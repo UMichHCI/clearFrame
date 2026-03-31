@@ -161,7 +161,7 @@ async def get_article_text_browser(url: str) -> str:
     max_steps=15 is sufficient for a simple article read; no interaction needed.
     """
     try:
-        browser = Browser()
+        browser = Browser(use_cloud=True)
         llm     = ChatOpenAI(model=MODEL_MINI)
 
         agent = Agent(
@@ -642,7 +642,6 @@ async def compare_full_text(original_text: str, top_df: pd.DataFrame, client: Op
             "sourcecountry": str(row.get("sourcecountry", "")),
             "seendate":      str(row.get("seendate", "")),
             "article_text":  str(row.get("article_text", ""))[:6000]
-        })
         })
 
     user_prompt = json.dumps({
