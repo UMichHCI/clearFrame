@@ -2,35 +2,44 @@
 ClearFrame Pipeline — v4
 =========================
 Architecture:
-  Stage 1  — Fetch and extract the base article text from its URL
+  Stage 1  — BrowserUse fetches and reads the base article via a real browser
+             (handles JS-heavy sites, anti-bot headers, paywalled previews)
   Stage 2  — LLM builds a structured GDELT query plan (location, country, terms, timespan)
   Stage 3  — GDELT DOC API returns up to 50 candidate articles matching the query
   Stage 4  — MediaRank backend source quality filter (top 30% cutoff, never shown to users)
   Stage 5  — Article classification: LLM classifies the base article type
              (breaking news / ongoing situation / economics-policy /
               historical-contextual / human-interest)
-  Stage 6  — Relevance checklist: LLM scores each candidate against the
-             explicit C1-C6 / H1-H4 / S1-S3 checklist. All answers stored.
-  Stage 7  — Select top 5 by scoring questions passed, geographic proximity preferred
-  Stage 8  — Fetch full text of top 5, run full-text comparison against base article
+  Stage 6  — Relevance judgment: LLM decides relevance holistically using guiding questions
+  Stage 7  — Select top 5 by confidence, local perspective preferred
+  Stage 8  — BrowserUse fetches full text of each selected article via a real browser,
+             then LLM runs a structured comparison against the base article
   Stage 9  — Display results
 
-What changed from v3 (LLM web search) to v4 (GDELT):
-  - Stage 0 (LLM web search) is removed entirely
-  - GDELT replaces it as the candidate source — structured, reproducible, global
-  - The old title-only 1-5 relevance score is replaced by the full
-    C1-C6 / H1-H4 / S1-S3 checklist from the meeting notes
-  - Article type classification is added before relevance scoring so the
-    checklist questions adapt to the article type (not just incidents)
-  - MediaRank filter is retained as a backend gate
+What changed from v4 (trafilatura) to v4-browser (BrowserUse):
+  - Stage 1: trafilatura + requests replaced by BrowserUse Agent
+    → handles JS-rendered pages, anti-bot headers, SPA sites, soft paywalls
+  - Stage 8: trafilatura loop replaced by BrowserUse Agent per article
+    → same benefits — each candidate article is read by a real browser
+  - Pipeline is now fully async (required by BrowserUse)
+  - trafilatura and requests are removed as dependencies
+
+Install:
+  pip install browser-use openai pandas python-dotenv
+  playwright install chromium
+
+.env:
+  OPENAI_API_KEY=your-key
 
 Sources:
   - ClearFrame paper (Ayyob et al., 2025)
+  - BrowserUse: https://github.com/browser-use/browser-use
   - GDELT 2.0: https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/
   - MediaRank: Ye & Skiena, KDD 2019 (arxiv.org/abs/1903.07581)
   - Munson & Resnick, CHI 2010 (doi:10.1145/1753326.1753543)
 """
 
+import asyncio
 import json
 import os
 import csv
@@ -38,11 +47,12 @@ import re
 import time
 from urllib.parse import urlparse
 
-import requests
-import trafilatura
+import requests       # still used for GDELT API only
 import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
+from langchain_openai import ChatOpenAI
+from browser_use import Agent, Browser
 
 load_dotenv()
 
@@ -127,17 +137,57 @@ def load_mediarank_data(filepath: str) -> dict[str, int]:
 
 
 # ─────────────────────────────────────────────
-# STAGE 1 — FETCH BASE ARTICLE
+# STAGE 1 — FETCH BASE ARTICLE (BrowserUse)
+# ─────────────────────────────────────────────
+#
+# Uses a real Chromium browser controlled by BrowserUse to load the page
+# and extract the article text. This handles:
+#   - JS-heavy / SPA sites that require JavaScript to render content
+#   - Anti-bot headers that block simple HTTP requests
+#   - Soft paywalls that show a preview before a login wall
+#   - Sites that require cookies or session state
+#
+# BrowserUse runs a Playwright-controlled Chromium instance. The Agent is
+# given a specific task: navigate to the URL and return the article text.
+# The result comes back via history.final_result().
 # ─────────────────────────────────────────────
 
-def get_article_text(url: str) -> str:
-    """Fetches and extracts clean text from a news article URL using trafilatura."""
+async def get_article_text_browser(url: str) -> str:
+    """
+    Fetches and extracts article text using a real browser via BrowserUse.
+    Falls back to an empty string if the browser fails or returns no content.
+
+    The agent task is deliberately narrow — navigate and extract text only.
+    max_steps=15 is sufficient for a simple article read; no interaction needed.
+    """
     try:
-        html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).text
-        text = trafilatura.extract(html)
-        return text[:8000] if text else ""
+        browser = Browser()
+        llm     = ChatOpenAI(model=MODEL_MINI)
+
+        agent = Agent(
+            task=(
+                f"Go to this URL: {url}\n"
+                "Wait for the page to fully load, then extract and return the full "
+                "main article text. Include the headline, byline, and all body paragraphs. "
+                "Do not include navigation menus, ads, comments, or related article links. "
+                "Return only the article text as plain text."
+            ),
+            llm=llm,
+            browser=browser,
+            max_steps=15
+        )
+
+        history = await agent.run()
+        result  = history.final_result() or ""
+        await browser.close()
+
+        text = result.strip()
+        if not text:
+            print(f"  [WARNING] BrowserUse returned empty content for: {url}")
+        return text[:8000]
+
     except Exception as e:
-        print(f"  [WARNING] Could not fetch {url}: {e}")
+        print(f"  [WARNING] BrowserUse failed for {url}: {e}")
         return ""
 
 
@@ -496,7 +546,18 @@ def select_top_articles(candidates_df: pd.DataFrame, scored: list[dict],
 
 
 # ─────────────────────────────────────────────
-# STAGE 8 — FULL-TEXT COMPARISON
+# STAGE 8 — FULL-TEXT COMPARISON (BrowserUse)
+# ─────────────────────────────────────────────
+#
+# For each of the top 5 selected articles, BrowserUse opens a real browser,
+# loads the article URL, and extracts the full text — exactly the same way
+# Stage 1 reads the base article. This solves the same problem: many local
+# news sites in Mexico, Nigeria, Ukraine etc. are JS-rendered or have headers
+# that block trafilatura/requests.
+#
+# Articles are fetched sequentially (not in parallel) to avoid launching
+# multiple Chromium instances at once, which is memory-intensive.
+# Each browser instance is opened and closed per article.
 # ─────────────────────────────────────────────
 
 FULLTEXT_COMPARISON_SCHEMA = {
@@ -541,18 +602,36 @@ For each candidate:
 - Return one comparison object per candidate
 """
 
-def compare_full_text(original_text: str, top_df: pd.DataFrame, client: OpenAI) -> pd.DataFrame:
+async def compare_full_text(original_text: str, top_df: pd.DataFrame, client: OpenAI) -> pd.DataFrame:
     """
-    Fetches full text for each selected article and runs a structured comparison
-    against the base article. Returns a merged DataFrame.
+    For each selected article, BrowserUse opens a real browser to fetch the full text,
+    then the LLM compares each article against the base article.
+
+    BrowserUse is used here for the same reason as Stage 1 — local news sites
+    in the event country frequently block simple HTTP scrapers.
+
+    Articles are fetched one at a time to avoid memory issues from multiple
+    simultaneous Chromium instances.
     """
     if top_df.empty:
         return pd.DataFrame()
 
-    # Fetch full text for each candidate
     top_df = top_df.copy()
-    top_df["article_text"] = top_df["url"].apply(get_article_text)
 
+    # Fetch full text for each candidate using BrowserUse
+    article_texts = []
+    for i, (_, row) in enumerate(top_df.iterrows()):
+        url   = str(row.get("url", ""))
+        title = str(row.get("title", ""))
+        print(f"      [{i+1}/{len(top_df)}] Fetching: {title[:60]}...")
+        text  = await get_article_text_browser(url)
+        article_texts.append(text)
+        if not text:
+            print(f"        → No content retrieved. Comparison will use title/metadata only.")
+
+    top_df["article_text"] = article_texts
+
+    # Build comparison payload for the LLM
     candidates = []
     for i, (_, row) in enumerate(top_df.iterrows()):
         candidates.append({
@@ -563,6 +642,7 @@ def compare_full_text(original_text: str, top_df: pd.DataFrame, client: OpenAI) 
             "sourcecountry": str(row.get("sourcecountry", "")),
             "seendate":      str(row.get("seendate", "")),
             "article_text":  str(row.get("article_text", ""))[:6000]
+        })
         })
 
     user_prompt = json.dumps({
@@ -641,7 +721,7 @@ def print_results(comparison_df: pd.DataFrame, n: int = MAX_DISPLAY):
 # MAIN PIPELINE
 # ─────────────────────────────────────────────
 
-def run_clearframe_pipeline(
+async def run_clearframe_pipeline(
     source_url: str,
     mediarank_filepath: str = "data/mediarank_rankings.csv",
     api_key: str | None = None,
@@ -650,19 +730,19 @@ def run_clearframe_pipeline(
     top_n: int = MAX_DISPLAY
 ) -> dict:
     """
-    Full ClearFrame pipeline (v4) — GDELT-integrated.
+    Full ClearFrame pipeline (v4 — BrowserUse edition).
 
     Provide a URL. The pipeline does the rest.
 
     Stages:
-      1  Fetch and extract the base article text
+      1  BrowserUse fetches the base article via a real Chromium browser
       2  LLM builds a structured GDELT query plan
       3  GDELT returns candidate articles
       4  MediaRank backend filter (top 30% cutoff, silent)
-      5  LLM classifies the base article type (C1–C6)
-      6  LLM scores each candidate with the H1–H4 / S1–S3 checklist
-      7  Select top 5 by score, local sources preferred
-      8  Fetch full text of top 5, run structured comparison
+      5  LLM classifies the base article type
+      6  LLM makes a holistic relevance judgment for each candidate
+      7  Select top 5 by confidence, local perspective preferred
+      8  BrowserUse fetches full text of each selected article, LLM compares
       9  Print and return results
 
     Args:
@@ -678,11 +758,11 @@ def run_clearframe_pipeline(
     """
     client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
-    # ── Stage 1: Fetch base article ───────────────────────────────────────
-    print("\n[1/8] Fetching base article...")
-    article_text = get_article_text(source_url)
+    # ── Stage 1: Fetch base article via BrowserUse ────────────────────────
+    print("\n[1/8] Fetching base article via BrowserUse...")
+    article_text = await get_article_text_browser(source_url)
     if not article_text:
-        raise ValueError(f"Could not extract text from: {source_url}")
+        raise ValueError(f"BrowserUse could not extract text from: {source_url}")
     print(f"      Extracted {len(article_text)} characters.")
     print(f"      Preview: {article_text[:200]}...\n")
 
@@ -753,9 +833,9 @@ def run_clearframe_pipeline(
                 "classification": classification, "scored": scored,
                 "selected_df": pd.DataFrame(), "comparison_df": pd.DataFrame()}
 
-    # ── Stage 8: Full-text comparison ────────────────────────────────────
-    print(f"\n[8/8] Fetching full text and comparing top {len(selected_df)} articles...")
-    comparison_df = compare_full_text(article_text, selected_df, client)
+    # ── Stage 8: Full-text comparison via BrowserUse ─────────────────────
+    print(f"\n[8/8] Fetching full text via BrowserUse and comparing top {len(selected_df)} articles...")
+    comparison_df = await compare_full_text(article_text, selected_df, client)
     print(f"      Comparison complete for {len(comparison_df)} article(s).")
 
     # ── Stage 9: Display ─────────────────────────────────────────────────
@@ -789,7 +869,7 @@ if __name__ == "__main__":
     # SOURCE_URL = "https://www.cbc.ca/news/world/venezuela-us-influence-trump-9.7122944"
     # SOURCE_URL = "https://www.nytimes.com/2026/03/14/business/media/washington-post-jeff-bezos-layoffs.html"
 
-    output = run_clearframe_pipeline(
+    output = asyncio.run(run_clearframe_pipeline(
         source_url=SOURCE_URL,
         mediarank_filepath="data/mediarank_rankings.csv"  # optional — skipped if not present
-    )
+    ))
