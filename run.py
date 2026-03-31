@@ -1,29 +1,32 @@
 """
-ClearFrame Article Relevance Pipeline — v3
-============================================
-New in this version:
-  - Stage 0: The LLM uses the built-in web_search tool to autonomously find
-    candidate articles based on the base article's extracted event metadata.
-    No manual candidate list is required. The pipeline is now fully self-contained:
-    you provide a base article, it finds and ranks everything else.
+ClearFrame Pipeline — v4
+=========================
+Architecture:
+  Stage 1  — Fetch and extract the base article text from its URL
+  Stage 2  — LLM builds a structured GDELT query plan (location, country, terms, timespan)
+  Stage 3  — GDELT DOC API returns up to 50 candidate articles matching the query
+  Stage 4  — MediaRank backend source quality filter (top 30% cutoff, never shown to users)
+  Stage 5  — Article classification: LLM classifies the base article type
+             (breaking news / ongoing situation / economics-policy /
+              historical-contextual / human-interest)
+  Stage 6  — Relevance checklist: LLM scores each candidate against the
+             explicit C1-C6 / H1-H4 / S1-S3 checklist. All answers stored.
+  Stage 7  — Select top 5 by scoring questions passed, geographic proximity preferred
+  Stage 8  — Fetch full text of top 5, run full-text comparison against base article
+  Stage 9  — Display results
 
-Unchanged from v2:
-  - Stage 1: Metadata extraction from the base article.
-  - Stage 2: MediaRank backend source quality filter (top 30% cutoff).
-             NewsGuard will be added here once the academic license is obtained.
-  - Stage 3: Explicit 9-question relevance checklist scored by the LLM.
-  - Stage 4: Select up to 5 articles, ranked by relevance score.
-  - No factual delta extraction yet (deferred to a future sprint).
-
-How Stage 0 works:
-  The LLM is given the extracted event metadata and a set of search query templates.
-  It issues multiple targeted searches using the Anthropic web_search tool, then
-  parses the results to build a pool of CandidateArticle objects. This approach
-  is grounded in ClearFrame's design goal of surfacing geographically proximate,
-  event-aligned coverage (ClearFrame paper, Ayyob et al., 2025).
+What changed from v3 (LLM web search) to v4 (GDELT):
+  - Stage 0 (LLM web search) is removed entirely
+  - GDELT replaces it as the candidate source — structured, reproducible, global
+  - The old title-only 1-5 relevance score is replaced by the full
+    C1-C6 / H1-H4 / S1-S3 checklist from the meeting notes
+  - Article type classification is added before relevance scoring so the
+    checklist questions adapt to the article type (not just incidents)
+  - MediaRank filter is retained as a backend gate
 
 Sources:
   - ClearFrame paper (Ayyob et al., 2025)
+  - GDELT 2.0: https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/
   - MediaRank: Ye & Skiena, KDD 2019 (arxiv.org/abs/1903.07581)
   - Munson & Resnick, CHI 2010 (doi:10.1145/1753326.1753543)
 """
@@ -34,14 +37,63 @@ import csv
 import re
 import time
 from urllib.parse import urlparse
+
+import requests
+import trafilatura
+import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
 
 load_dotenv()
 
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+
+MODEL_MINI   = "gpt-4o-mini"   # lightweight tasks: extraction, query plan, classification
+MODEL_FULL   = "gpt-4o"        # heavier tasks: relevance checklist, full-text comparison
+
+GDELT_URL    = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+# MediaRank: rank out of 50,695 sources. Top 30% = rank ≤ 15,208.
+# Backend filter only — never shown to users.
+MEDIARANK_TOTAL   = 50_695
+MEDIARANK_CUTOFF  = int(MEDIARANK_TOTAL * 0.30)   # 15,208
+
+MAX_GDELT_RESULTS    = 50    # max articles fetched from GDELT
+MAX_CANDIDATES_RANK  = 20    # max candidates passed to relevance scoring
+MAX_DISPLAY          = 5     # max articles shown to user
+
+
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+
+def api_chat(client, system: str, user: str, max_tokens: int = 2000,
+             model: str | None = None, response_format=None) -> str:
+    """Chat completion with exponential backoff on rate limits."""
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user}
+    ]
+    chosen = model or MODEL_MINI
+    kwargs = {"model": chosen, "messages": messages, "max_tokens": max_tokens}
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    for attempt in range(6):
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content.strip()
+        except RateLimitError:
+            wait = 2 ** attempt
+            print(f"  [Rate limit] Waiting {wait}s (attempt {attempt + 1}/6)...")
+            time.sleep(wait)
+    raise RuntimeError("Exceeded max retries due to rate limiting.")
+
 
 def extract_json(text: str) -> str:
-    """Strip markdown code fences if present, returning raw JSON text."""
+    """Strip markdown code fences if present."""
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
@@ -49,740 +101,676 @@ def extract_json(text: str) -> str:
     return text.strip()
 
 
-def api_chat(client: OpenAI, system: str, user: str, max_tokens: int = 2000,
-             model: str | None = None) -> str:
-    """Chat completion with exponential backoff on rate limits. Returns response text."""
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    chosen_model = model or OPENAI_MINI_MODEL
-    for attempt in range(6):
-        try:
-            resp = client.chat.completions.create(
-                model=chosen_model,
-                messages=messages,
-                max_tokens=max_tokens,
-            )
-            return resp.choices[0].message.content.strip()
-        except RateLimitError:
-            wait = 2 ** attempt
-            print(f"      [Rate limit] Waiting {wait}s before retry (attempt {attempt + 1}/6)...")
-            time.sleep(wait)
-    raise RuntimeError("Exceeded max retries due to rate limiting.")
-
-
-def api_search(client: OpenAI, instruction: str) -> str:
-    """Runs a web search via the OpenAI Responses API. Returns the response text."""
-    for attempt in range(6):
-        try:
-            resp = client.responses.create(
-                model=OPENAI_SEARCH_MODEL,
-                tools=[{"type": "web_search"}],
-                input=instruction,
-            )
-            return resp.output_text.strip()
-        except RateLimitError:
-            wait = 2 ** attempt
-            print(f"      [Rate limit] Waiting {wait}s before retry (attempt {attempt + 1}/6)...")
-            time.sleep(wait)
-    raise RuntimeError("Exceeded max retries due to rate limiting.")
-
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-
-OPENAI_MODEL        = "gpt-4o"        # used for complex reasoning (relevance scoring)
-OPENAI_MINI_MODEL   = "gpt-4o-mini"  # used for lighter tasks (extraction, parsing, query gen)
-OPENAI_SEARCH_MODEL = "gpt-5"        # used for web search via Responses API
-
-# MediaRank: rank out of 50,695 total sources (Ye & Skiena, KDD 2019).
-# Top 30% cutoff = rank ≤ 15,208. Backend filter only — never displayed to users.
-MEDIARANK_TOTAL_SOURCES = 50_695
-MEDIARANK_CUTOFF_PERCENTILE = 0.30
-MEDIARANK_CUTOFF_RANK = int(MEDIARANK_TOTAL_SOURCES * MEDIARANK_CUTOFF_PERCENTILE)
-
-# How many search queries to issue when finding candidates (Stage 0).
-# More queries = broader candidate pool, but more API calls.
-MAX_SEARCH_QUERIES = 5
-
-# Maximum candidates to carry forward into relevance scoring.
-MAX_CANDIDATE_POOL = 20
-
-# Maximum articles to show to the user.
-MAX_DISPLAY_ARTICLES = 5
-
-# Minimum relevance score to pass (out of 100).
-RELEVANCE_SCORE_THRESHOLD = 60
-
-
-# ─────────────────────────────────────────────
-# MEDIARANK LOADER
-# ─────────────────────────────────────────────
-
 def load_mediarank_data(filepath: str) -> dict[str, int]:
     """
-    Loads MediaRank data into a domain → rank lookup dict.
+    Loads MediaRank domain → rank from a local CSV.
     Export from: https://www.media-rank.com/filter#
-
-    Expected CSV columns: domain, rank, ...
-    Returns dict mapping domain → global rank (lower = better quality).
-    If the file is not found, returns an empty dict and logs a warning.
+    Expected columns: domain, rank
+    Returns empty dict if file not found (filter is then skipped).
     """
     ranks: dict[str, int] = {}
-
     if not os.path.exists(filepath):
-        print(f"[WARNING] MediaRank file not found at '{filepath}'. "
-              f"MediaRank filter will be skipped until the file is added.")
+        print(f"[WARNING] MediaRank file not found at '{filepath}'. Filter skipped.")
         return ranks
-
     with open(filepath, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             domain = row.get("domain", "").lower().strip()
-            rank = row.get("rank")
+            rank   = row.get("rank")
             if domain and rank:
                 try:
                     ranks[domain] = int(rank)
                 except ValueError:
                     pass
-
-    print(f"[INFO] Loaded {len(ranks)} MediaRank domain ranks from '{filepath}'.")
+    print(f"[INFO] Loaded {len(ranks)} MediaRank ranks from '{filepath}'.")
     return ranks
 
 
 # ─────────────────────────────────────────────
-# DATA MODELS
+# STAGE 1 — FETCH BASE ARTICLE
 # ─────────────────────────────────────────────
 
-class ArticleMetadata:
-    """Structured event metadata extracted from the base article."""
-    def __init__(self, summary: str, city: str, region: str, country: str,
-                 event_date_range: str, entity_list: list[str]):
-        self.summary = summary
-        self.city = city
-        self.region = region
-        self.country = country
-        self.event_date_range = event_date_range
-        self.entity_list = entity_list
-
-
-class CandidateArticle:
-    """A candidate article discovered via web search or provided manually."""
-    def __init__(self, article_id: str, title: str, url: str,
-                 source_name: str, domain: str,
-                 mediarank_rank: int | None = None,
-                 snippet: str = ""):
-        self.article_id = article_id
-        self.title = title
-        self.url = url
-        self.source_name = source_name
-        self.domain = domain.lower().strip()
-        self.mediarank_rank = mediarank_rank
-        self.snippet = snippet  # search result excerpt, used in relevance scoring
-
-    def passes_source_filter(self) -> tuple[bool, str]:
-        """
-        Hard source quality gate — backend only, never shown to users.
-        MediaRank rank must be within top 30% globally (≤ 15,208 / 50,695).
-        Sources with no rank data are allowed through.
-        NOTE: NewsGuard check added here once academic license is obtained.
-        """
-        if self.mediarank_rank is not None:
-            if self.mediarank_rank > MEDIARANK_CUTOFF_RANK:
-                return False, (
-                    f"MediaRank rank {self.mediarank_rank} is outside the top 30% "
-                    f"(cutoff: rank ≤ {MEDIARANK_CUTOFF_RANK} / {MEDIARANK_TOTAL_SOURCES})."
-                )
-        return True, "passes"
-
-
-class RelevanceResult:
-    """Output of the LLM relevance scoring stage for one candidate."""
-    def __init__(self, article_id: str, score: int, label: str,
-                 hard_fail: bool, checklist_answers: dict[str, str],
-                 need_full_text: bool):
-        self.article_id = article_id
-        self.score = score
-        self.label = label
-        self.hard_fail = hard_fail
-        self.checklist_answers = checklist_answers
-        self.need_full_text = need_full_text
+def get_article_text(url: str) -> str:
+    """Fetches and extracts clean text from a news article URL using trafilatura."""
+    try:
+        html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).text
+        text = trafilatura.extract(html)
+        return text[:8000] if text else ""
+    except Exception as e:
+        print(f"  [WARNING] Could not fetch {url}: {e}")
+        return ""
 
 
 # ─────────────────────────────────────────────
-# STAGE 0: WEB SEARCH — FIND CANDIDATE ARTICLES
-# ─────────────────────────────────────────────
-#
-# The LLM is given the extracted event metadata and a set of explicit search
-# query templates. It issues multiple web searches and parses the results into
-# a structured list of CandidateArticle objects.
-#
-# Query strategy (grounded in ClearFrame paper Section 3.3):
-#   The pipeline looks for articles that are:
-#     (1) Geographically proximate to the event location
-#     (2) About the same specific event (not just the same topic)
-#     (3) From outlets in the event's country or region
-#     (4) Published within the event's timeframe
-#
-# We issue multiple queries to maximize coverage across:
-#   - English-language international sources covering the event
-#   - Local-language sources in the event country
-#   - Specific named entities / actors involved
+# STAGE 2 — GDELT QUERY PLAN
 # ─────────────────────────────────────────────
 
-SEARCH_QUERY_SYSTEM_PROMPT = """You are a research assistant helping find LOCAL news coverage of a specific event.
-
-Your goal is to find how news outlets IN THE EVENT'S COUNTRY reported on this event — NOT coverage from
-American or Western international media (CNN, BBC, Reuters, NYT, etc. are already known).
-
-Given event metadata, generate {max_queries} targeted web search queries following these rules:
-
-  MANDATORY:
-  - At least 3 of the {max_queries} queries MUST be written in the local/official language(s) of the event country.
-    (e.g. Arabic for Iraq, Spanish for Mexico/Cuba, French for France, etc.)
-  - At least 1 query should use a country-specific domain hint (e.g. site:.iq, site:.mx, site:.fr).
-    EXCEPTION: Do NOT use site:.cu — Cuba's internet is government-controlled and not publicly indexed.
-    For Cuba, instead target known diaspora outlets: site:14ymedio.com OR site:cibercuba.com OR site:radiomartí.com
-  - Every query must target the SPECIFIC incident, not the general topic.
-
-  AVOID:
-  - Generic English queries that will return CNN/BBC/Reuters/NYT results.
-  - Broad topic queries (e.g. "US military Iraq" — too vague).
-  - site:.cu (Cuba only — those domains are not publicly accessible).
-
-  FORMAT:
-  - Keep queries short (4–8 words), factual, no opinion words.
-  - Vary the queries — do not rephrase the same query.
-
-Return ONLY a valid JSON array of query strings. No preamble, no markdown fences.
-Example for an event in Iraq: ["تحطم طائرة KC-135 العراق 2026", "site:.iq طائرة عسكرية أمريكية", "KC-135 crash Irak mars 2026"]
-Example for Cuba: ["Trump tomar Cuba 2026", "site:14ymedio.com apagón Cuba", "Díaz-Canel inversión extranjera marzo 2026"]
-"""
-
-SEARCH_RESULT_PARSE_SYSTEM_PROMPT = """You are parsing web search results to extract news article metadata.
-
-Given raw search results, extract each distinct news article found and return structured data.
-Only include items that are clearly news articles (not homepages, wikis, social media, or forums).
-
-Return ONLY a valid JSON array. No preamble, no markdown fences.
-
-Each item:
-{
-  "title": "<article headline>",
-  "url": "<full URL>",
-  "source_name": "<outlet name, e.g. Reuters, Vanguardia>",
-  "domain": "<domain only, e.g. reuters.com>",
-  "snippet": "<1-2 sentence excerpt from the search result, or empty string if none>"
+QUERY_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "location":       {"type": "string"},
+        "source_country": {"type": "string"},
+        "terms": {
+            "type":     "array",
+            "items":    {"type": "string"},
+            "minItems": 3,
+            "maxItems": 4
+        },
+        "timespan": {
+            "type": "string",
+            "enum": ["1m", "3m", "6m", "1y"]
+        }
+    },
+    "required":             ["location", "source_country", "terms", "timespan"],
+    "additionalProperties": False
 }
 
-If a URL appears in multiple search results, only include it once (deduplicate by URL).
-If fewer than 3 clear articles are found, return whatever is available."""
+QUERY_PLAN_SYSTEM = """
+You create ONE broad GDELT query plan for finding similar news articles.
 
+Rules:
+- Return exactly one location where the event takes place
+- Return exactly one source_country (the country where the event takes place)
+- If location is a city or region, source_country is the country containing it
+- The location must always appear in the final query
+- Return 3 to 4 broad topic terms — short, simple, broad recall over narrow precision
+- Default timespan to 1y unless the article is clearly very time-bound (then 3m or 6m)
+"""
 
-def generate_search_queries(
-    metadata: ArticleMetadata,
-    client: OpenAI
-) -> list[str]:
-    """
-    Uses the LLM to generate a set of targeted search queries from event metadata.
-    Returns a list of query strings ready to pass to the web_search tool.
-    """
-    prompt = SEARCH_QUERY_SYSTEM_PROMPT.format(max_queries=MAX_SEARCH_QUERIES)
-
-    user_content = f"""Event metadata:
-- Summary: {metadata.summary}
-- City: {metadata.city}
-- Region: {metadata.region}
-- Country: {metadata.country}
-- Date range: {metadata.event_date_range}
-- Key entities: {', '.join(metadata.entity_list)}
-
-Generate {MAX_SEARCH_QUERIES} search queries to find local and regional news coverage of this event."""
-
-    raw = api_chat(client, system=prompt, user=user_content, max_tokens=500)
-    queries = json.loads(extract_json(raw))
-    return queries[:MAX_SEARCH_QUERIES]
-
-
-def run_web_searches(
-    queries: list[str],
-    metadata: ArticleMetadata,
-    client: OpenAI
-) -> list[CandidateArticle]:
-    """
-    Issues web searches via the OpenAI Responses API (web_search_preview tool),
-    then parses results into CandidateArticle objects.
-
-    The Responses API handles search execution automatically — no agentic loop needed.
-    """
-    query_list_str = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(queries))
-    search_instruction = f"""Search the web for LOCAL news coverage of this event. The event occurred in {metadata.country}.
-
-Your goal is to find how news outlets IN {metadata.country.upper()} (and neighboring countries) covered this story.
-PRIORITIZE: local news outlets, regional media, country-specific news sites, local-language reporting.
-DEPRIORITIZE: CNN, BBC, Reuters, AP, NYT, Washington Post, The Guardian, and other major US/UK international outlets — their coverage is already known.
-
-Run ALL of the following search queries and collect every distinct article found:
-{query_list_str}
-
-For every article found, list:
-- Title
-- Full URL
-- Source/outlet name
-- Country the outlet is based in
-- 1-2 sentence excerpt
-
-Include ALL articles found, especially those from {metadata.country} or the surrounding region."""
-
-    print(f"      Issuing {len(queries)} web searches...")
-    raw_results_text = api_search(client, search_instruction)
-
-    # Parse the collected text into structured CandidateArticle objects
-    print("      Parsing search results into candidate articles...")
-    candidates = parse_search_results_to_candidates(raw_results_text, client)
-    print(f"      Found {len(candidates)} unique candidate articles from web search.")
-    return candidates
-
-
-def parse_search_results_to_candidates(
-    raw_results_text: str,
-    client: OpenAI
-) -> list[CandidateArticle]:
-    """
-    Uses the LLM to extract structured article metadata from raw search result text.
-    Deduplicates by URL and assigns sequential IDs.
-    """
-    if not raw_results_text.strip():
-        print("      [WARNING] No search result text to parse.")
-        return []
-
+def make_query_plan(article_text: str, client: OpenAI) -> dict:
     raw = api_chat(
         client,
-        system=SEARCH_RESULT_PARSE_SYSTEM_PROMPT,
-        user=f"Parse these search results:\n\n{raw_results_text[:8000]}",
-        max_tokens=3000,
+        system=QUERY_PLAN_SYSTEM,
+        user=f"Article:\n{article_text}",
+        max_tokens=400,
+        response_format={"type": "json_object"}
     )
+    return json.loads(extract_json(raw))
 
+
+def quote_if_needed(text: str) -> str:
+    text = str(text).strip()
+    return f'"{text}"' if " " in text else text
+
+
+def normalize_country(text: str) -> str:
+    return str(text).strip().lower().replace(" ", "")
+
+
+def clean_plan(plan: dict, max_terms: int = 4) -> dict:
+    location       = str(plan.get("location", "")).strip()
+    source_country = str(plan.get("source_country", "")).strip()
+    timespan       = str(plan.get("timespan", "1y")).strip()
+
+    terms = []
+    for term in plan.get("terms", []):
+        term = str(term).strip()
+        if (term
+                and term.lower() != location.lower()
+                and term.lower() != source_country.lower()
+                and term not in terms):
+            terms.append(term)
+    terms = terms[:max_terms]
+
+    if not location:
+        raise ValueError("Query plan: location is empty.")
+    if not source_country:
+        raise ValueError("Query plan: source_country is empty.")
+    if not terms:
+        raise ValueError("Query plan: no usable terms.")
+
+    return {"location": location, "source_country": source_country,
+            "terms": terms, "timespan": timespan}
+
+
+def build_gdelt_query(location: str, terms: list[str], source_country: str) -> str:
+    """
+    Builds a GDELT DOC API query string.
+    Format: "LOCATION" AND (term1 OR term2 OR term3) AND sourcecountry:country
+    """
+    loc    = quote_if_needed(location)
+    tparts = " OR ".join(quote_if_needed(t) for t in terms)
+    ctry   = normalize_country(source_country)
+    return f"{loc} AND ({tparts}) AND sourcecountry:{ctry}"
+
+
+# ─────────────────────────────────────────────
+# STAGE 3 — GDELT SEARCH
+# ─────────────────────────────────────────────
+
+def search_gdelt(query: str, timespan: str = "1y", maxrecords: int = 50) -> dict:
+    """
+    Queries the GDELT DOC API v2 and returns the raw JSON response.
+    GDELT monitors broadcast, print, and web news in 100+ languages globally.
+    Docs: https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/
+    """
+    params = {
+        "query":      query,
+        "mode":       "ArtList",
+        "format":     "json",
+        "maxrecords": maxrecords,
+        "timespan":   timespan
+    }
+    response = requests.get(GDELT_URL, params=params, timeout=30)
     try:
-        records = json.loads(extract_json(raw))
-    except json.JSONDecodeError:
-        # Model returned prose instead of JSON — ask it to convert explicitly
-        print("      [WARNING] Response was not JSON. Retrying with strict JSON instruction...")
-        print(f"      [DEBUG] Raw response was: {raw[:300]!r}")
-        retry = api_chat(
-            client,
-            system="Convert the following text into a valid JSON array of news articles. "
-                   "Each item must have: title, url, source_name, domain, snippet. "
-                   "Return ONLY the JSON array, no other text.",
-            user=raw[:6000],
-            max_tokens=3000,
-        )
-        try:
-            records = json.loads(extract_json(retry))
-        except json.JSONDecodeError:
-            print("      [WARNING] Retry also failed. Returning empty list.")
-            return []
-
-    seen_urls: set[str] = set()
-    candidates: list[CandidateArticle] = []
-
-    for i, rec in enumerate(records):
-        url = rec.get("url", "").strip()
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-
-        # Extract domain from URL
-        try:
-            domain = urlparse(url).netloc.lower().replace("www.", "")
-        except Exception:
-            domain = rec.get("domain", "unknown")
-
-        candidates.append(CandidateArticle(
-            article_id=f"search_{i:03d}",
-            title=rec.get("title", "Untitled"),
-            url=url,
-            source_name=rec.get("source_name", domain),
-            domain=domain,
-            mediarank_rank=None,  # looked up from file in Stage 2
-            snippet=rec.get("snippet", "")
-        ))
-
-    return candidates[:MAX_CANDIDATE_POOL]
+        return response.json()
+    except Exception:
+        print("[WARNING] GDELT did not return valid JSON:")
+        print(response.text[:500])
+        return {}
 
 
 # ─────────────────────────────────────────────
-# STAGE 1: ARTICLE METADATA EXTRACTION
+# STAGE 4 — MEDIARANK SOURCE QUALITY FILTER
 # ─────────────────────────────────────────────
 
-def extract_article_metadata(article_text: str, client: OpenAI) -> ArticleMetadata:
+def filter_by_mediarank(df: pd.DataFrame, mediarank_lookup: dict[str, int]) -> tuple[pd.DataFrame, list[dict]]:
     """
-    Extracts structured event metadata from the base article.
-    These fields anchor all search queries and relevance scoring downstream.
-    """
-    system_prompt = """You are an information extraction assistant. Given a news article,
-extract structured event metadata. Return ONLY valid JSON. No preamble, no markdown fences.
-
-Output schema:
-{
-  "summary": "<1 sentence describing the specific incident or event>",
-  "city": "<city where the event occurred, or null>",
-  "region": "<state, province, or region, or null>",
-  "country": "<country where the event occurred>",
-  "event_date_range": "<ISO date or range, e.g. 2026-02-23 or 2026-02-22 to 2026-02-24>",
-  "entity_list": ["<named person, organization, government, or armed group>"]
-}"""
-
-    raw = api_chat(client, system=system_prompt, user=f"Extract metadata:\n\n{article_text}", max_tokens=1000)
-    data = json.loads(extract_json(raw))
-    return ArticleMetadata(
-        summary=data.get("summary", ""),
-        city=data.get("city") or "",
-        region=data.get("region") or "",
-        country=data.get("country", ""),
-        event_date_range=data.get("event_date_range", ""),
-        entity_list=data.get("entity_list", [])
-    )
-
-
-# ─────────────────────────────────────────────
-# STAGE 2: SOURCE QUALITY FILTERING
-# ─────────────────────────────────────────────
-
-def filter_candidates_by_source_quality(
-    candidates: list[CandidateArticle],
-    mediarank_lookup: dict[str, int]
-) -> tuple[list[CandidateArticle], list[dict]]:
-    """
-    Applies the MediaRank hard gate using the pre-loaded local data file.
-    Attaches ranks to candidates whose domains are found in the lookup.
+    Applies the MediaRank top-30% cutoff as a backend hard gate.
+    Sources outside the top 30% (rank > 15,208) are dropped.
     Sources with no rank data are allowed through.
     Results never shown to users.
     """
-    for c in candidates:
-        if c.mediarank_rank is None and c.domain in mediarank_lookup:
-            c.mediarank_rank = mediarank_lookup[c.domain]
+    if df.empty or not mediarank_lookup:
+        return df, []
 
-    passing, rejections = [], []
-    for c in candidates:
-        ok, reason = c.passes_source_filter()
-        if ok:
-            passing.append(c)
-        else:
+    passing    = []
+    rejections = []
+
+    for _, row in df.iterrows():
+        domain = str(row.get("domain", "")).lower().strip()
+        rank   = mediarank_lookup.get(domain)
+
+        if rank is not None and rank > MEDIARANK_CUTOFF:
             rejections.append({
-                "article_id": c.article_id,
-                "source": c.source_name,
-                "reason": reason
+                "domain": domain,
+                "rank":   rank,
+                "reason": f"MediaRank rank {rank} is outside top 30% (>{MEDIARANK_CUTOFF}/{MEDIARANK_TOTAL})."
             })
+        else:
+            passing.append(row)
 
-    return passing, rejections
+    passing_df = pd.DataFrame(passing).reset_index(drop=True) if passing else pd.DataFrame()
+    return passing_df, rejections
 
 
 # ─────────────────────────────────────────────
-# STAGE 3: LLM RELEVANCE SCORING — EXPLICIT CHECKLIST
+# STAGE 5 — ARTICLE TYPE CLASSIFICATION
+# ─────────────────────────────────────────────
+#
+# The base article is classified before relevance scoring so the
+# checklist questions adapt to the article type. This prevents the
+# pipeline from being limited to only incident/breaking-news articles.
+#
+# Classification checklist (C1–C6) — all answers stored, nothing is a black box.
 # ─────────────────────────────────────────────
 
-RELEVANCE_CHECKLIST = """
-=== HARD CHECKS (answer Yes or No) ===
-A "No" to any of Q1–Q4 sets hard_fail = true and score = 0.
+CLASSIFICATION_SYSTEM = """
+You are classifying a news article to understand what kind of story it is.
+Use your own judgment. Return ONLY valid JSON. No preamble, no markdown fences.
 
-Q1. Same incident: Does this article describe the SAME specific incident or event
-    as the base article — not merely the same topic, region, or ongoing conflict?
+Your goal is to identify the primary nature of the article so that relevance
+scoring later can be interpreted appropriately. This is not a rigid test —
+use the categories below as a thinking guide, not a checklist.
 
-Q2. Same location: Does this article refer to the same geographic location (city,
-    region, or country) as the base article's event?
+Categories to consider (pick the one that best describes the article's core focus):
+  - breaking_news     : Something specific just happened and coverage is time-sensitive
+  - ongoing_situation : A situation that has been developing over time with no single trigger
+  - economics_policy  : Primarily about economic conditions, policy, legislation, or trade
+  - historical        : Primarily about past events or background context
+  - human_interest    : Primarily about how people or communities are experiencing something
+  - mixed             : Genuinely spans more than one category
 
-Q3. Same timeframe: Is this article reporting on events within ±7 days of the base
-    article's event date? (Use judgment for ongoing events.)
+Some questions that might help you decide (use them as a guide, not a formula):
+  - Is there a specific triggering event, or is this about a broader situation?
+  - Is time a critical factor in the article's relevance, or would it still matter months from now?
+  - Is the focus on data, policy, and institutions — or on people and lived experience?
+  - Does the article describe something that happened recently, or does it explain background?
 
-Q4. Non-zero information delta: Does this article appear to add, confirm, or contest
-    at least one piece of information relevant to the base article's event?
-
-=== SOFT SCORING SIGNALS (answer Yes, Partial, or No + brief reason) ===
-
-Q5. Shared named entities: Does this article reference the same key people,
-    organizations, or armed groups as the base article?
-
-Q6. Same event phase: Does this article describe the same phase of the event
-    (e.g., both cover the immediate aftermath, not one the cause and one a
-    follow-up weeks later)?
-
-Q7. Geographic proximity of source: Is this article from an outlet based in the
-    same country or region as the event?
-
-Q8. Linguistic/cultural proximity: Is this article in the local language of the
-    event country, or does it reflect a distinctly local perspective?
-
-Q9. Headline signal strength: Does the headline directly reference the specific
-    event, location, and/or key actors?
+Output schema:
+{
+  "primary_type":   "breaking_news | ongoing_situation | economics_policy | historical | human_interest | mixed",
+  "secondary_type": "<type or null if no meaningful secondary>",
+  "justification":  "<1-2 sentences explaining your reasoning in plain language>"
+}
 """
 
-RELEVANCE_SYSTEM_PROMPT = f"""You are scoring whether candidate articles are about the same specific event
-as a base article. Work through the checklist for EACH candidate. Do not skip questions.
+def classify_article(article_text: str, client: OpenAI) -> dict:
+    raw = api_chat(
+        client,
+        system=CLASSIFICATION_SYSTEM,
+        user=f"Classify this article:\n\n{article_text[:4000]}",
+        max_tokens=600
+    )
+    return json.loads(extract_json(raw))
 
-{RELEVANCE_CHECKLIST}
 
-=== SCORING RULES ===
-If ANY of Q1–Q4 is "No": hard_fail = true, score = 0, label = "different_event".
-If all Q1–Q4 are "Yes":
-  Base score: 60
-  Q5 Yes → +15, Partial → +7, No → +0
-  Q6 Yes → +10, Partial → +5, No → +0
-  Q7 Yes → +8, No → +0
-  Q8 Yes → +5, No → +0
-  Q9 Yes → +2, No → +0
-  Maximum possible: 100
+# ─────────────────────────────────────────────
+# STAGE 6 — RELEVANCE SCORING
+# ─────────────────────────────────────────────
+#
+# The LLM makes a holistic relevance judgment for each candidate.
+# The questions below are a thinking guide — they are not a checklist
+# to fill out mechanically. The LLM uses them to structure its reasoning,
+# but the final decision is its own judgment call.
+#
+# The article type from Stage 5 tells the LLM what kind of relevance matters.
+# ─────────────────────────────────────────────
 
-Labels:
-  "same_event"      → score ≥ 75, hard_fail = false
-  "related_context" → score 60–74, hard_fail = false
-  "different_event" → hard_fail = true OR score < 60
-  "uncertain"       → score 60–74 AND relevance cannot be determined from title/snippet alone
+RELEVANCE_SYSTEM_TEMPLATE = """
+You are deciding whether candidate news articles are relevant to a base article.
+The base article has been classified as: {primary_type}{secondary_note}.
+
+Your job is to make a judgment call for each candidate — not to fill out a form.
+Think through what relevance means for this type of article, then decide.
+
+To help structure your thinking, consider questions like these:
+  - Does this candidate cover the same subject as the base article, given what kind of story it is?
+  - Is it about the same place, or a clearly related one?
+  - Is it from a timeframe that makes it meaningfully relevant?
+  - Does it add something — a different angle, local context, a contrasting framing?
+  - Are the key actors, institutions, or communities involved overlapping?
+  - Is this from a local outlet that might offer ground-level perspective?
+
+These questions are not a checklist. They are examples of the kinds of things
+that make an article relevant or irrelevant. Use your judgment. Some candidates
+will be obviously relevant or obviously not — trust that. Others will be borderline;
+in those cases, lean toward including if the article adds meaningful local perspective.
+
+What to return for each candidate:
+  - relevant: true or false — your overall judgment
+  - confidence: "high", "medium", or "low" — how certain you are
+  - reasoning: 2-3 sentences explaining your thinking in plain language
+  - local_perspective: true or false — whether this adds a locally-grounded viewpoint
 
 Return ONLY a valid JSON array. No preamble, no markdown fences.
 
 Each item:
 {{
-  "id": "...",
-  "score_0_100": <integer>,
-  "label": "same_event" | "related_context" | "different_event" | "uncertain",
-  "hard_fail": true | false,
-  "need_snippet_or_fulltext": true | false,
-  "checklist": {{
-    "Q1_same_incident":        "<Yes/No + reason>",
-    "Q2_same_location":        "<Yes/No + reason>",
-    "Q3_same_timeframe":       "<Yes/No + reason>",
-    "Q4_nonzero_delta":        "<Yes/No + reason>",
-    "Q5_shared_entities":      "<Yes/Partial/No + reason>",
-    "Q6_same_event_phase":     "<Yes/Partial/No + reason>",
-    "Q7_geographic_proximity": "<Yes/No + reason>",
-    "Q8_linguistic_proximity": "<Yes/No + reason>",
-    "Q9_headline_signal":      "<Yes/No + reason>"
-  }}
-}}"""
+  "row_index":        <integer matching the candidate's row_index>,
+  "relevant":         true | false,
+  "confidence":       "high" | "medium" | "low",
+  "reasoning":        "<2-3 sentences of plain-language explanation>",
+  "local_perspective": true | false
+}}
+"""
 
-
-def score_candidate_relevance(
-    base_metadata: ArticleMetadata,
-    candidates: list[CandidateArticle],
-    client: OpenAI
-) -> list[RelevanceResult]:
+def score_candidates(base_text: str, candidates_df: pd.DataFrame,
+                     classification: dict, client: OpenAI) -> list[dict]:
     """
-    Scores all candidates against the explicit 9-question checklist.
-    Includes title AND snippet in the payload so the LLM has more signal.
-    All answers are stored — the decision is fully auditable.
+    Makes a holistic relevance judgment for each candidate.
+    The LLM uses the article type and a set of guiding questions to reason
+    through relevance, then returns a plain-language explanation and a
+    true/false decision. No rigid checklist — judgment-based.
     """
-    candidate_payload = [
-        {
-            "id": c.article_id,
-            "title": c.title,
-            "source": c.source_name,
-            "snippet": c.snippet
-        }
-        for c in candidates
-    ]
+    if candidates_df.empty:
+        return []
 
-    user_prompt = f"""Base article event record:
-- Event summary: {base_metadata.summary}
-- Where: {base_metadata.city}, {base_metadata.region}, {base_metadata.country}
-- When: {base_metadata.event_date_range}
-- Key entities: {', '.join(base_metadata.entity_list)}
+    primary_type   = classification.get("primary_type", "breaking_news")
+    secondary      = classification.get("secondary_type")
+    secondary_note = f" (secondary type: {secondary})" if secondary else ""
 
-Candidate articles (title + snippet from web search):
-{json.dumps(candidate_payload, indent=2, ensure_ascii=False)}
+    system = RELEVANCE_SYSTEM_TEMPLATE.format(
+        primary_type=primary_type,
+        secondary_note=secondary_note
+    )
 
-Score each candidate using the full checklist. Return JSON array only."""
-
-    raw = api_chat(client, system=RELEVANCE_SYSTEM_PROMPT, user=user_prompt, max_tokens=4000, model=OPENAI_MODEL)
-    results_data = json.loads(extract_json(raw))
-
-    return [
-        RelevanceResult(
-            article_id=item["id"],
-            score=item["score_0_100"],
-            label=item["label"],
-            hard_fail=item.get("hard_fail", False),
-            checklist_answers=item.get("checklist", {}),
-            need_full_text=item.get("need_snippet_or_fulltext", False)
-        )
-        for item in results_data
-    ]
-
-
-# ─────────────────────────────────────────────
-# STAGE 4: ARTICLE SELECTION (up to 5)
-# ─────────────────────────────────────────────
-
-def select_articles(
-    candidates: list[CandidateArticle],
-    relevance_results: list[RelevanceResult],
-    max_count: int = MAX_DISPLAY_ARTICLES
-) -> list[dict]:
-    """
-    Selects up to max_count articles from those that passed relevance scoring.
-
-    Ranking:
-      1. Filter: hard_fail = False AND score >= RELEVANCE_SCORE_THRESHOLD.
-      2. Sort by score descending.
-      3. Tiebreaker: prefer Q7 (local outlet) and Q8 (local language) = Yes.
-      4. Return top max_count.
-    """
-    candidate_map = {c.article_id: c for c in candidates}
-
-    eligible = [
-        r for r in relevance_results
-        if not r.hard_fail and r.score >= RELEVANCE_SCORE_THRESHOLD
-    ]
-
-    def effective_score(r: RelevanceResult) -> int:
-        """Boost score for local/regional sources so they rank above same-score foreign outlets."""
-        geo  = 20 if "Yes" in r.checklist_answers.get("Q7_geographic_proximity", "") else 0
-        ling = 10 if "Yes" in r.checklist_answers.get("Q8_linguistic_proximity", "") else 0
-        return r.score + geo + ling
-
-    eligible.sort(key=effective_score, reverse=True)
-
-    output = []
-    for r in eligible[:max_count]:
-        c = candidate_map.get(r.article_id)
-        if not c:
-            continue
-        output.append({
-            "article_id":      c.article_id,
-            "source_name":     c.source_name,
-            "title":           c.title,
-            "url":             c.url,
-            "snippet":         c.snippet,
-            "relevance_score": r.score,
-            "effective_score": effective_score(r),
-            "label":           r.label,
-            "checklist":       r.checklist_answers
+    candidates_payload = []
+    for i, (_, row) in enumerate(candidates_df.iterrows()):
+        candidates_payload.append({
+            "row_index":     i,
+            "title":         str(row.get("title", "")),
+            "domain":        str(row.get("domain", "")),
+            "sourcecountry": str(row.get("sourcecountry", "")),
+            "seendate":      str(row.get("seendate", "")),
+            "language":      str(row.get("language", ""))
         })
 
-    return output
+    user_prompt = json.dumps({
+        "base_article_summary": base_text[:3000],
+        "candidates":           candidates_payload
+    }, ensure_ascii=False)
+
+    raw = api_chat(
+        client,
+        system=system,
+        user=user_prompt,
+        max_tokens=4000,
+        model=MODEL_FULL
+    )
+
+    return json.loads(extract_json(raw))
 
 
 # ─────────────────────────────────────────────
-# MAIN PIPELINE ORCHESTRATOR
+# STAGE 7 — SELECT TOP 5
+# ─────────────────────────────────────────────
+
+def select_top_articles(candidates_df: pd.DataFrame, scored: list[dict],
+                        max_count: int = MAX_DISPLAY) -> pd.DataFrame:
+    """
+    Selects up to max_count articles from those the LLM judged as relevant.
+
+    Selection logic:
+      1. Keep only candidates where relevant = true
+      2. Sort by confidence: high > medium > low
+      3. Tiebreaker: prefer local_perspective = true
+      4. Return top max_count
+
+    Reasoning and confidence are preserved in the output DataFrame
+    so the decision is fully inspectable.
+    """
+    confidence_rank = {"high": 3, "medium": 2, "low": 1}
+
+    passing = [r for r in scored if r.get("relevant", False)]
+
+    passing.sort(
+        key=lambda r: (
+            confidence_rank.get(r.get("confidence", "low"), 0),
+            1 if r.get("local_perspective", False) else 0
+        ),
+        reverse=True
+    )
+
+    top = passing[:max_count]
+
+    if not top:
+        return pd.DataFrame()
+
+    selected_indices = [r["row_index"] for r in top]
+    selected_df      = candidates_df.iloc[selected_indices].copy().reset_index(drop=True)
+
+    # Attach reasoning columns for full transparency
+    meta_rows = []
+    for r in top:
+        meta_rows.append({
+            "row_index":        r["row_index"],
+            "relevant":         r.get("relevant", False),
+            "confidence":       r.get("confidence", ""),
+            "reasoning":        r.get("reasoning", ""),
+            "local_perspective": r.get("local_perspective", False)
+        })
+
+    meta_df = pd.DataFrame(meta_rows).reset_index(drop=True)
+    return pd.concat([selected_df, meta_df.drop(columns=["row_index"])], axis=1)
+
+
+# ─────────────────────────────────────────────
+# STAGE 8 — FULL-TEXT COMPARISON
+# ─────────────────────────────────────────────
+
+FULLTEXT_COMPARISON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "comparisons": {
+            "type":  "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "row_index":                 {"type": "integer"},
+                    "summary":                   {"type": "string"},
+                    "similarities":              {"type": "array", "items": {"type": "string"}},
+                    "differences":               {"type": "array", "items": {"type": "string"}},
+                    "source_country_perspective":{"type": "string"},
+                    "added_value":               {"type": "string"},
+                    "overall_relatedness": {
+                        "type": "string",
+                        "enum": ["very high", "high", "medium", "low"]
+                    }
+                },
+                "required": ["row_index", "summary", "similarities", "differences",
+                             "source_country_perspective", "added_value", "overall_relatedness"],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required":             ["comparisons"],
+    "additionalProperties": False
+}
+
+FULLTEXT_COMPARISON_SYSTEM = """
+You are comparing full news articles against an original article.
+
+For each candidate:
+- Explain how it is similar to and different from the original article
+- Use the article text, not just the title
+- Focus on: event overlap, geography, actors, timeline, framing, emphasis
+- Explain what perspective the source country may add
+- Infer perspective cautiously and only from article text, title, and metadata
+- If perspective is unclear, say so
+- Return one comparison object per candidate
+"""
+
+def compare_full_text(original_text: str, top_df: pd.DataFrame, client: OpenAI) -> pd.DataFrame:
+    """
+    Fetches full text for each selected article and runs a structured comparison
+    against the base article. Returns a merged DataFrame.
+    """
+    if top_df.empty:
+        return pd.DataFrame()
+
+    # Fetch full text for each candidate
+    top_df = top_df.copy()
+    top_df["article_text"] = top_df["url"].apply(get_article_text)
+
+    candidates = []
+    for i, (_, row) in enumerate(top_df.iterrows()):
+        candidates.append({
+            "row_index":     i,
+            "title":         str(row.get("title", "")),
+            "domain":        str(row.get("domain", "")),
+            "language":      str(row.get("language", "")),
+            "sourcecountry": str(row.get("sourcecountry", "")),
+            "seendate":      str(row.get("seendate", "")),
+            "article_text":  str(row.get("article_text", ""))[:6000]
+        })
+
+    user_prompt = json.dumps({
+        "original_article_text": original_text[:6000],
+        "candidates":            candidates
+    }, ensure_ascii=False)
+
+    resp = client.chat.completions.create(
+        model=MODEL_FULL,
+        messages=[
+            {"role": "system", "content": FULLTEXT_COMPARISON_SYSTEM},
+            {"role": "user",   "content": user_prompt}
+        ],
+        max_tokens=4000,
+        response_format={"type": "json_object"}
+    )
+
+    raw             = resp.choices[0].message.content.strip()
+    comparison_data = json.loads(extract_json(raw)).get("comparisons", [])
+    comparison_df   = pd.DataFrame(comparison_data)
+
+    merged = comparison_df.merge(
+        top_df.reset_index(drop=True).reset_index().rename(columns={"index": "row_index"}),
+        on="row_index",
+        how="left"
+    )
+    return merged
+
+
+# ─────────────────────────────────────────────
+# DISPLAY HELPERS
+# ─────────────────────────────────────────────
+
+def print_results(comparison_df: pd.DataFrame, n: int = MAX_DISPLAY):
+    if comparison_df.empty:
+        print("No results to display.")
+        return
+
+    for i, (_, row) in enumerate(comparison_df.head(n).iterrows(), start=1):
+        title          = row.get("title", "N/A")
+        url            = row.get("url", "")
+        source         = row.get("sourcecountry", "N/A")
+        domain         = row.get("domain", "N/A")
+        language       = row.get("language", "N/A")
+        relatedness    = row.get("overall_relatedness", "N/A")
+        confidence     = row.get("confidence", "N/A")
+        local          = row.get("local_perspective", False)
+        reasoning      = row.get("reasoning", "")
+        summary        = row.get("summary", "")
+        similarities   = row.get("similarities", [])
+        differences    = row.get("differences", [])
+        perspective    = row.get("source_country_perspective", "")
+        added_value    = row.get("added_value", "")
+
+        print(f"\n{'='*70}")
+        print(f"  #{i}  {title}")
+        print(f"  URL             : {url}")
+        print(f"  Source          : {source} | Domain: {domain} | Language: {language}")
+        print(f"  Confidence      : {confidence} | Local perspective: {local}")
+        print(f"  Overall related : {relatedness}")
+        print(f"\n  RELEVANCE REASONING:\n  {reasoning}")
+        print(f"\n  SUMMARY:\n  {summary}")
+        print(f"\n  SIMILARITIES:")
+        for s in similarities:
+            print(f"    • {s}")
+        print(f"\n  DIFFERENCES:")
+        for d in differences:
+            print(f"    • {d}")
+        print(f"\n  SOURCE-COUNTRY PERSPECTIVE:\n  {perspective}")
+        print(f"\n  ADDED VALUE:\n  {added_value}")
+
+    print(f"\n{'='*70}")
+
+
+# ─────────────────────────────────────────────
+# MAIN PIPELINE
 # ─────────────────────────────────────────────
 
 def run_clearframe_pipeline(
-    base_article_text: str,
+    source_url: str,
     mediarank_filepath: str = "data/mediarank_rankings.csv",
-    api_key: str | None = None
+    api_key: str | None = None,
+    max_gdelt_results: int = MAX_GDELT_RESULTS,
+    max_candidates_rank: int = MAX_CANDIDATES_RANK,
+    top_n: int = MAX_DISPLAY
 ) -> dict:
     """
-    Full self-contained ClearFrame pipeline (v3).
+    Full ClearFrame pipeline (v4) — GDELT-integrated.
 
-    Provide only the base article text — the pipeline finds everything else.
+    Provide a URL. The pipeline does the rest.
 
     Stages:
-      0. Generate search queries from event metadata; run web searches; collect candidates.
-      1. Extract structured event metadata from the base article.
-      2. Load MediaRank data; filter candidates by source quality (backend only).
-      3. Score remaining candidates using the explicit 9-question relevance checklist.
-      4. Select up to 5 articles ranked by relevance score.
+      1  Fetch and extract the base article text
+      2  LLM builds a structured GDELT query plan
+      3  GDELT returns candidate articles
+      4  MediaRank backend filter (top 30% cutoff, silent)
+      5  LLM classifies the base article type (C1–C6)
+      6  LLM scores each candidate with the H1–H4 / S1–S3 checklist
+      7  Select top 5 by score, local sources preferred
+      8  Fetch full text of top 5, run structured comparison
+      9  Print and return results
 
     Args:
-        base_article_text:  Full text of the article the user is reading.
-        mediarank_filepath:  Path to MediaRank CSV. Export from media-rank.com/filter.
-                             Pipeline runs without it (no MediaRank filter applied).
-        api_key:            OpenAI API key. Falls back to OPENAI_API_KEY env var.
+        source_url          : URL of the article the user is reading
+        mediarank_filepath  : Path to MediaRank CSV (optional, skipped if missing)
+        api_key             : OpenAI API key (falls back to OPENAI_API_KEY env var)
+        max_gdelt_results   : How many articles to pull from GDELT (default 50)
+        max_candidates_rank : How many to pass to relevance scoring (default 20)
+        top_n               : How many to show to the user (default 5)
 
-    Returns dict with keys:
-        metadata           — extracted event fields from the base article
-        selected_articles  — up to 5 articles to show the user
-        rejection_log      — sources rejected by the MediaRank filter
-        relevance_debug    — full checklist answers for every scored candidate
-        search_queries     — the queries that were issued in Stage 0
+    Returns:
+        dict with all intermediate and final outputs for debugging
     """
     client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
-    # ── Stage 1: Extract base article metadata ────────────────────────────
-    print("[1/4] Extracting base article metadata...")
-    metadata = extract_article_metadata(base_article_text, client)
-    print(f"      Summary  : {metadata.summary}")
-    print(f"      Location : {metadata.city}, {metadata.region}, {metadata.country}")
-    print(f"      Date     : {metadata.event_date_range}")
-    print(f"      Entities : {', '.join(metadata.entity_list)}")
+    # ── Stage 1: Fetch base article ───────────────────────────────────────
+    print("\n[1/8] Fetching base article...")
+    article_text = get_article_text(source_url)
+    if not article_text:
+        raise ValueError(f"Could not extract text from: {source_url}")
+    print(f"      Extracted {len(article_text)} characters.")
+    print(f"      Preview: {article_text[:200]}...\n")
 
-    # ── Stage 0: Generate queries and search the web ──────────────────────
-    # (Numbered 0 but run after metadata extraction, which it depends on.)
-    print("\n[0/4] Generating search queries and finding candidate articles...")
-    queries = generate_search_queries(metadata, client)
-    print(f"      Generated {len(queries)} search queries:")
-    for q in queries:
-        print(f"        • {q}")
+    # ── Stage 2: Build GDELT query plan ───────────────────────────────────
+    print("[2/8] Building GDELT query plan...")
+    plan  = make_query_plan(article_text, client)
+    plan  = clean_plan(plan, max_terms=4)
+    query = build_gdelt_query(plan["location"], plan["terms"], plan["source_country"])
+    print(f"      Plan     : {plan}")
+    print(f"      Query    : {query}")
 
-    raw_candidates = run_web_searches(queries, metadata, client)
+    # ── Stage 3: Search GDELT ─────────────────────────────────────────────
+    print(f"\n[3/8] Searching GDELT (timespan={plan['timespan']}, max={max_gdelt_results})...")
+    gdelt_results = search_gdelt(query, timespan=plan["timespan"], maxrecords=max_gdelt_results)
+    gdelt_df      = pd.DataFrame(gdelt_results.get("articles", []))
+    print(f"      GDELT returned {len(gdelt_df)} articles.")
 
-    if not raw_candidates:
-        print("      [WARNING] Web search returned no candidates.")
-        return {
-            "metadata": vars(metadata),
-            "selected_articles": [],
-            "rejection_log": [],
-            "relevance_debug": [],
-            "search_queries": queries
-        }
+    if gdelt_df.empty:
+        print("      No results from GDELT. Exiting early.")
+        return {"source_url": source_url, "article_text": article_text,
+                "plan": plan, "query": query, "gdelt_df": gdelt_df,
+                "selected_df": pd.DataFrame(), "comparison_df": pd.DataFrame()}
 
-    # ── Stage 2: Source quality filter ───────────────────────────────────
-    print(f"\n[2/4] Filtering {len(raw_candidates)} candidates by source quality...")
-    mediarank_lookup = load_mediarank_data(mediarank_filepath)
-    qualified, rejections = filter_candidates_by_source_quality(raw_candidates, mediarank_lookup)
-    print(f"      {len(qualified)} passed  |  {len(rejections)} rejected")
+    # ── Stage 4: MediaRank filter ─────────────────────────────────────────
+    print(f"\n[4/8] Applying MediaRank source quality filter...")
+    mediarank_lookup         = load_mediarank_data(mediarank_filepath)
+    filtered_df, rejections  = filter_by_mediarank(gdelt_df, mediarank_lookup)
+    print(f"      {len(filtered_df)} passed  |  {len(rejections)} rejected")
     for r in rejections:
-        print(f"        ✗ {r['source']}: {r['reason']}")
+        print(f"        ✗ {r['domain']} — {r['reason']}")
 
-    if not qualified:
-        return {
-            "metadata": vars(metadata),
-            "selected_articles": [],
-            "rejection_log": rejections,
-            "relevance_debug": [],
-            "search_queries": queries
-        }
+    candidates_df = filtered_df.head(max_candidates_rank).reset_index(drop=True)
 
-    # ── Stage 3: Relevance scoring ────────────────────────────────────────
-    print(f"\n[3/4] Scoring {len(qualified)} candidates for relevance...")
-    relevance_results = score_candidate_relevance(metadata, qualified, client)
+    if candidates_df.empty:
+        print("      No candidates after filtering. Exiting early.")
+        return {"source_url": source_url, "article_text": article_text,
+                "plan": plan, "query": query, "gdelt_df": gdelt_df,
+                "selected_df": pd.DataFrame(), "comparison_df": pd.DataFrame()}
 
-    for r in relevance_results:
-        status = "PASS" if (not r.hard_fail and r.score >= RELEVANCE_SCORE_THRESHOLD) else "FAIL"
-        print(f"      [{status}] {r.article_id} — score: {r.score:>3}  label: {r.label}")
+    # ── Stage 5: Classify base article ───────────────────────────────────
+    print(f"\n[5/8] Classifying base article type...")
+    classification = classify_article(article_text, client)
+    print(f"      Primary type : {classification.get('primary_type')}")
+    print(f"      Secondary    : {classification.get('secondary_type')}")
+    print(f"      Justification: {classification.get('justification')}")
 
-    # ── Stage 4: Final selection ──────────────────────────────────────────
-    print(f"\n[4/4] Selecting up to {MAX_DISPLAY_ARTICLES} articles...")
-    selected = select_articles(qualified, relevance_results, max_count=MAX_DISPLAY_ARTICLES)
-    print(f"      {len(selected)} article(s) selected.\n")
+    # ── Stage 6: Relevance scoring ────────────────────────────────────────
+    print(f"\n[6/8] Judging relevance of {len(candidates_df)} candidates...")
+    scored = score_candidates(article_text, candidates_df, classification, client)
 
-    # Print a clean summary for quick inspection
-    print("=" * 60)
-    print("SELECTED ARTICLES")
-    print("=" * 60)
-    for i, a in enumerate(selected, 1):
-        print(f"  {i}. [{a['relevance_score']}] {a['source_name']} — {a['title']}")
-        print(f"     {a['url']}")
-    print("=" * 60)
+    passed = sum(1 for r in scored if r.get("relevant", False))
+    print(f"      {passed} candidates judged relevant out of {len(scored)}")
+
+    for r in scored:
+        status     = "RELEVANT" if r.get("relevant", False) else "NOT RELEVANT"
+        confidence = r.get("confidence", "")
+        print(f"        [{status}] row {r['row_index']}  confidence: {confidence}")
+
+    # ── Stage 7: Select top articles ─────────────────────────────────────
+    print(f"\n[7/8] Selecting top {top_n} articles...")
+    selected_df = select_top_articles(candidates_df, scored, max_count=top_n)
+    print(f"      {len(selected_df)} article(s) selected.")
+
+    if selected_df.empty:
+        print("      No articles passed selection criteria.")
+        return {"source_url": source_url, "article_text": article_text,
+                "plan": plan, "query": query, "gdelt_df": gdelt_df,
+                "classification": classification, "scored": scored,
+                "selected_df": pd.DataFrame(), "comparison_df": pd.DataFrame()}
+
+    # ── Stage 8: Full-text comparison ────────────────────────────────────
+    print(f"\n[8/8] Fetching full text and comparing top {len(selected_df)} articles...")
+    comparison_df = compare_full_text(article_text, selected_df, client)
+    print(f"      Comparison complete for {len(comparison_df)} article(s).")
+
+    # ── Stage 9: Display ─────────────────────────────────────────────────
+    print_results(comparison_df, n=top_n)
 
     return {
-        "metadata": {
-            "summary":     metadata.summary,
-            "location":    f"{metadata.city}, {metadata.region}, {metadata.country}",
-            "date_range":  metadata.event_date_range,
-            "entities":    metadata.entity_list
-        },
-        "selected_articles": selected,
-        "rejection_log":     rejections,
-        "relevance_debug": [
-            {
-                "article_id": r.article_id,
-                "score":      r.score,
-                "label":      r.label,
-                "hard_fail":  r.hard_fail,
-                "checklist":  r.checklist_answers
-            }
-            for r in relevance_results
-        ],
-        "search_queries": queries
+        "source_url":      source_url,
+        "article_text":    article_text,
+        "plan":            plan,
+        "query":           query,
+        "gdelt_df":        gdelt_df,
+        "classification":  classification,
+        "scored":          scored,
+        "selected_df":     selected_df,
+        "comparison_df":   comparison_df
     }
 
 
@@ -791,54 +779,17 @@ def run_clearframe_pipeline(
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Paste any news article text here to run the full pipeline.
-    # The LLM will search the web, score candidates, and return the top 5.
-    BASE_ARTICLE = """
-    Trump Casts a Shadow Over One of Mexico's Deadliest States
 
-    In Sinaloa, a state of three million people that has been a stronghold of the Sinaloa
-    Cartel for decades, residents are about 20 months into a war that began when the cartel
-    fractured into two. President Trump wants to strike cartels inside Mexico. In Sinaloa
-    State, some residents said they were willing to entertain U.S. intervention.
+    # Swap any of these in to test different article types
+    SOURCE_URL = "https://www.cbsnews.com/news/missing-workers-canada-mining-company-found-dead-sinaloa-mexico/"
+    # SOURCE_URL = "https://www.washingtonpost.com/world/2026/03/17/us-iran-israel-war-ali-larijani/"
+    # SOURCE_URL = "https://www.aljazeera.com/news/2026/3/17/many-killed-wounded-after-blasts-hit-nigerias-maiduguri-witnesses-say"
+    # SOURCE_URL = "https://www.who.int/news/item/09-01-2026-sudan-1000-days-of-war-deepen-the-world-s-worst-health-and-humanitarian-crisis"
+    # SOURCE_URL = "https://www.nbcnews.com/world/north-korea/north-korea-fires-missiles-sea-show-force-seoul-rcna263450"
+    # SOURCE_URL = "https://www.cbc.ca/news/world/venezuela-us-influence-trump-9.7122944"
+    # SOURCE_URL = "https://www.nytimes.com/2026/03/14/business/media/washington-post-jeff-bezos-layoffs.html"
 
-    On the whole, Mexicans do not support Trump's proposal of U.S. military strikes against
-    the country's powerful cartels — nearly eight in 10 opposed the idea in a national poll
-    last month. But in Sinaloa, many residents said they were desperate for peace at
-    whatever cost, even if it meant a U.S. military intervention.
-
-    Daily life in Culiacán, the capital of Sinaloa, has been upended since July 2024 when
-    one of El Chapo's sons betrayed El Mayo, splitting the Sinaloa Cartel. At the height of
-    the violence, people barricaded themselves indoors for weeks. Bodies were dumped along
-    roadsides, gun battles erupted in upscale neighborhoods and burned-out tractor-trailers
-    blocked highways. Just in January, two lawmakers were shot after leaving the State
-    Congress. Ten workers from a Canadian-owned gold mine were abducted; seven bodies were
-    later found.
-
-    Sinaloa state lost nearly 10 percent of its GDP in 2024 and 2025. More than 2,000
-    companies have shut down. Hotel, tourism, and restaurant sales have dropped 50 percent.
-
-    Mexican security forces, with more than 12,000 soldiers dispatched by President
-    Claudia Sheinbaum, have arrested dozens of high-ranking cartel members. Last month,
-    security forces killed Rubén Oseguera Cervantes (El Mencho), leader of the Jalisco New
-    Generation Cartel, igniting retaliatory violence across at least 20 states.
-
-    On Saturday, Trump mocked President Sheinbaum at a summit of 12 Latin American
-    countries focused on defeating cartels, saying she had refused his help. Sheinbaum
-    responded: "It's good that President Trump publicly says that when he proposed sending
-    the U.S. military into Mexico, we said no. Because that's the truth."
-
-    Cartel members described stockpiling weapons, installing lookouts scanning the skies,
-    and buying rocket-propelled grenades and anti-drone systems costing up to $40,000 each.
-
-    Published: 2026-03-11. Source: The New York Times.
-    Authors: Paulina Villegas, Jack Nicas. Reporting from Culiacán, Mexico.
-    """
-
-    result = run_clearframe_pipeline(
-        base_article_text=BASE_ARTICLE,
-        mediarank_filepath="data/mediarank_rankings.csv"  # optional — skip if file not present
+    output = run_clearframe_pipeline(
+        source_url=SOURCE_URL,
+        mediarank_filepath="data/mediarank_rankings.csv"  # optional — skipped if not present
     )
-
-    # Full JSON output for debugging
-    print("\nFULL OUTPUT (JSON):")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
