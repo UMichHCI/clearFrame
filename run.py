@@ -51,8 +51,7 @@ import requests       # still used for GDELT API only
 import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
-from langchain_openai import ChatOpenAI
-from browser_use import Agent, Browser
+from browser_use import Agent, Browser, ChatOpenAI
 
 load_dotenv()
 
@@ -161,25 +160,39 @@ async def get_article_text_browser(url: str) -> str:
     max_steps=15 is sufficient for a simple article read; no interaction needed.
     """
     try:
-        browser = Browser(use_cloud=True)
+        browser = Browser()
         llm     = ChatOpenAI(model=MODEL_MINI)
 
         agent = Agent(
             task=(
-                f"Go to this URL: {url}\n"
-                "Wait for the page to fully load, then extract and return the full "
-                "main article text. Include the headline, byline, and all body paragraphs. "
-                "Do not include navigation menus, ads, comments, or related article links. "
-                "Return only the article text as plain text."
+                f"You are a web scraper. Navigate to this URL: {url}\n\n"
+                "1. Wait 8 seconds for the page to fully load.\n"
+                "2. Use the extract action with this exact query: "
+                "'Extract the full article text including headline, byline, and all body paragraphs.'\n"
+                "3. Call done() and pass the FULL extracted text verbatim as the result.\n\n"
+                "IMPORTANT: The done() result must be the raw article text itself — "
+                "not a summary, not a description of what you did. Copy it word for word."
             ),
             llm=llm,
             browser=browser,
-            max_steps=15
+            max_steps=6
         )
 
         history = await agent.run()
         result  = history.final_result() or ""
-        await browser.close()
+
+        # The agent sometimes writes a summary into the done() call instead of
+        # the full text. Fall back to the raw extracted_content() from extract
+        # actions, which always contains the verbatim page text.
+        if len(result) < 500:
+            extracted = history.extracted_content()
+            if extracted:
+                result = "\n\n".join(extracted)
+
+        try:
+            await browser.close()
+        except Exception:
+            pass
 
         text = result.strip()
         if not text:
@@ -217,14 +230,26 @@ QUERY_PLAN_SCHEMA = {
 
 QUERY_PLAN_SYSTEM = """
 You create ONE broad GDELT query plan for finding similar news articles.
+Respond with a JSON object only — no explanation, no markdown, no extra keys.
+
+The JSON must have exactly these four top-level keys:
+  "location"       — the city or region where the event takes place (string, never empty)
+  "source_country" — the country that contains that location (string, never empty)
+  "terms"          — 3 to 4 short broad topic keywords (array of strings)
+  "timespan"       — one of: "1m", "3m", "6m", "1y"
+
+Example output:
+{
+  "location": "Puerto Vallarta",
+  "source_country": "Mexico",
+  "terms": ["cartel", "violence", "drug war"],
+  "timespan": "1y"
+}
 
 Rules:
-- Return exactly one location where the event takes place
-- Return exactly one source_country (the country where the event takes place)
-- If location is a city or region, source_country is the country containing it
-- The location must always appear in the final query
-- Return 3 to 4 broad topic terms — short, simple, broad recall over narrow precision
-- Default timespan to 1y unless the article is clearly very time-bound (then 3m or 6m)
+- location and source_country must never be empty strings
+- terms should be broad for high recall — avoid overly specific phrases
+- Default timespan to 1y unless the article is very time-bound (then 3m or 6m)
 """
 
 def make_query_plan(article_text: str, client: OpenAI) -> dict:
@@ -591,15 +616,19 @@ FULLTEXT_COMPARISON_SCHEMA = {
 
 FULLTEXT_COMPARISON_SYSTEM = """
 You are comparing full news articles against an original article.
+Respond with a JSON object with a single key "comparisons" whose value is an array — one object per candidate.
 
-For each candidate:
-- Explain how it is similar to and different from the original article
-- Use the article text, not just the title
-- Focus on: event overlap, geography, actors, timeline, framing, emphasis
-- Explain what perspective the source country may add
-- Infer perspective cautiously and only from article text, title, and metadata
-- If perspective is unclear, say so
-- Return one comparison object per candidate
+For each candidate object include exactly these keys:
+  "row_index"                — integer matching the candidate's row_index
+  "summary"                  — 2-3 sentence summary of the candidate article
+  "similarities"             — array of strings: ways it overlaps with the original
+  "differences"              — array of strings: ways it diverges from the original
+  "source_country_perspective" — string: what angle the source country adds (or "unclear")
+  "added_value"              — string: what this article adds that the original lacks
+  "overall_relatedness"      — one of: "very high", "high", "medium", "low"
+
+Focus on: event overlap, geography, actors, timeline, framing, emphasis.
+Infer perspective cautiously from article text, title, and metadata only.
 """
 
 async def compare_full_text(original_text: str, top_df: pd.DataFrame, client: OpenAI) -> pd.DataFrame:
@@ -860,13 +889,16 @@ async def run_clearframe_pipeline(
 if __name__ == "__main__":
 
     # Swap any of these in to test different article types
-    SOURCE_URL = "https://www.cbsnews.com/news/missing-workers-canada-mining-company-found-dead-sinaloa-mexico/"
+    # SOURCE_URL = "https://www.nbcnews.com/world/mexico/videos-puerto-vallarta-smoke-flames-killing-jalisco-el-mencho-rcna260243"
     # SOURCE_URL = "https://www.washingtonpost.com/world/2026/03/17/us-iran-israel-war-ali-larijani/"
     # SOURCE_URL = "https://www.aljazeera.com/news/2026/3/17/many-killed-wounded-after-blasts-hit-nigerias-maiduguri-witnesses-say"
     # SOURCE_URL = "https://www.who.int/news/item/09-01-2026-sudan-1000-days-of-war-deepen-the-world-s-worst-health-and-humanitarian-crisis"
     # SOURCE_URL = "https://www.nbcnews.com/world/north-korea/north-korea-fires-missiles-sea-show-force-seoul-rcna263450"
     # SOURCE_URL = "https://www.cbc.ca/news/world/venezuela-us-influence-trump-9.7122944"
     # SOURCE_URL = "https://www.nytimes.com/2026/03/14/business/media/washington-post-jeff-bezos-layoffs.html"
+    # SOURCE_URL = "https://www.reuters.com/world/asia-pacific/hopes-dim-swift-end-iran-war-after-trump-speech-oil-prices-surge-anew-2026-04-02/"
+    SOURCE_URL = "washingtonpost.com/national-security/2026/04/02/trump-fires-bondi-doj/?itid=hp-top-table-main_p001_f001"
+
 
     output = asyncio.run(run_clearframe_pipeline(
         source_url=SOURCE_URL,

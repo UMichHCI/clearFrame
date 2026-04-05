@@ -61,22 +61,23 @@ def scrape_country(country: str, session: requests.Session) -> list[dict]:
 
 
 def main():
-    # domain -> best rank seen
-    all_sources: dict[str, int] = {}
+    # domain -> {"rank": best rank, "countries": set of countries}
+    all_sources: dict[str, dict] = {}
 
     session = requests.Session()
     session.headers.update({
         "User-Agent": "ClearFrame-Academic-Research/1.0 (media ranking dataset collection)"
     })
 
-    # First grab the default "All" view
+    # First grab the default "All" view (no country label)
     print("Scraping: All (default top 500)...")
     try:
         resp = session.get(URL, timeout=30)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         for row in parse_table(soup):
-            all_sources[row["domain"]] = row["rank"]
+            d, r = row["domain"], row["rank"]
+            all_sources[d] = {"rank": r, "countries": set()}
         print(f"  Found {len(all_sources)} sources from default view")
     except requests.RequestException as e:
         print(f"  [ERROR] Failed default fetch: {e}")
@@ -88,26 +89,29 @@ def main():
         new_count = 0
         for row in rows:
             d, r = row["domain"], row["rank"]
-            if d not in all_sources or r < all_sources[d]:
-                if d not in all_sources:
-                    new_count += 1
-                all_sources[d] = r
+            if d not in all_sources:
+                all_sources[d] = {"rank": r, "countries": set()}
+                new_count += 1
+            elif r < all_sources[d]["rank"]:
+                all_sources[d]["rank"] = r
+            all_sources[d]["countries"].add(country)
         print(f"  Got {len(rows)} rows, {new_count} new unique domains (total: {len(all_sources)})")
         time.sleep(0.5)  # be polite
 
     # Sort by rank and write CSV
-    sorted_sources = sorted(all_sources.items(), key=lambda x: x[1])
+    sorted_sources = sorted(all_sources.items(), key=lambda x: x[1]["rank"])
 
     output_path = "data/mediarank_rankings.csv"
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["domain", "rank"])
-        for domain, rank in sorted_sources:
-            writer.writerow([domain, rank])
+        writer.writerow(["domain", "rank", "countries"])
+        for domain, info in sorted_sources:
+            countries_str = "|".join(sorted(info["countries"])) if info["countries"] else ""
+            writer.writerow([domain, info["rank"], countries_str])
 
     print(f"\nDone! Wrote {len(sorted_sources)} unique sources to {output_path}")
     if sorted_sources:
-        print(f"Rank range: {sorted_sources[0][1]} to {sorted_sources[-1][1]}")
+        print(f"Rank range: {sorted_sources[0][1]['rank']} to {sorted_sources[-1][1]['rank']}")
 
 
 if __name__ == "__main__":
