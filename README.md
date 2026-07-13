@@ -5,10 +5,6 @@ event, and compares them through the analytic categories of Herman & Chomsky's
 propaganda model (*Manufacturing Consent*, 1988) to surface what reading them
 **together** reveals that no single article shows on its own.
 
-The model is **structural, not conspiratorial**: coverage patterns follow from an
-outlet's position, its audience, and its sourcing constraints — not from the
-intent of any journalist. Nothing in the output attributes intent to individuals.
-
 There are two ways to run it:
 
 - **Command line** — `run.py`, prints a full 9-stage log to your terminal.
