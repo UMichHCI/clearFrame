@@ -3,3 +3,10 @@ venv/
 __pycache__/
 *.pyc
 debug_runs/
+
+# macOS metadata
+.DS_Store
+
+# Local data / experiment outputs — kept on disk, not published
+data/
+ownership_test_results/
