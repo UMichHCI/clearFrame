@@ -1,0 +1,11 @@
+# ClearFrame runtime dependencies.
+# The web front end (app.py) uses only the Python standard library — these are
+# for the pipeline itself (run.py).
+#
+# Install with:  pip install -r requirements.txt
+
+trafilatura==2.0.0
+openai==2.16.0
+pandas==3.0.2
+python-dotenv==1.2.1
+requests==2.32.5

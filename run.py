@@ -1,19 +1,29 @@
 """
 ClearFrame Pipeline — v5
 =========================
+Article selection and analysis are grounded exclusively in the propaganda model
+of Herman and Chomsky (Manufacturing Consent, 1988). Candidates are selected by
+full-text pair analysis against the base article, not by title-based scoring.
+
+The propaganda model is STRUCTURAL, not conspiratorial. Coverage patterns follow
+from an outlet's position, its audience, its sourcing constraints, and the
+institutional pressures it operates under. No editorial directive is required for
+these patterns to appear — the selection happens upstream of any individual
+article. Nothing in this pipeline attributes intent to journalists or outlets,
+and no user-facing string may do so.
+
 Architecture:
-  Stage 1  — trafilatura fetches and extracts the base article text
+  Stage 1  — trafilatura fetches and extracts the base article text + pub date
   Stage 2  — LLM builds a structured GDELT query plan (location, country, terms, timespan)
-  Stage 3  — GDELT DOC API returns up to 50 candidate articles matching the query
-  Stage 4  — MediaRank backend source quality filter (top 30% cutoff, never shown to users)
-  Stage 5  — Article classification: LLM classifies the base article type
+  Stage 3  — GDELT DOC API returns candidate articles (+ regional fallback)
+  Stage 4  — Article classification: LLM classifies the base article type
              (breaking news / ongoing situation / economics-policy /
               historical-contextual / human-interest)
-  Stage 6  — Relevance judgment: LLM decides relevance holistically using guiding questions
-  Stage 7  — Select top 5 by confidence, local perspective preferred
-  Stage 8  — trafilatura fetches full text of each selected article,
-             then LLM runs a structured comparison against the base article
-  Stage 9  — Display results
+  Stage 5  — Topical gate: lightweight binary same-event filter on title/metadata
+  Stage 6  — Full-text fetch for up to 10 gated candidates, local sources first
+  Stage 7  — Chomsky pair analysis: base <-> candidate, full text, per-category findings
+  Stage 8  — Selection: deterministic illumination score computed in Python, top 5
+  Stage 9  — Synthesis + display (brief user-facing output, verbose dev output)
 
 Install:
   pip install trafilatura openai pandas python-dotenv requests
@@ -23,15 +33,14 @@ Install:
 
 Sources:
   - ClearFrame paper (Ayyob et al., 2025)
+  - Herman & Chomsky, Manufacturing Consent (1988)
   - trafilatura: https://trafilatura.readthedocs.io/
   - GDELT 2.0: https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/
-  - MediaRank: Ye & Skiena, KDD 2019 (arxiv.org/abs/1903.07581)
   - Munson & Resnick, CHI 2010 (doi:10.1145/1753326.1753543)
 """
 
 import json
 import os
-import csv
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -49,19 +58,24 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────
 
-MODEL_MINI   = "gpt-4o-mini"   # lightweight tasks: extraction, query plan, classification
-MODEL_FULL   = "gpt-4o"        # heavier tasks: relevance checklist, full-text comparison
+MODEL_MINI   = "gpt-4o-mini"   # lightweight tasks: query plan, classification, topical gate
+MODEL_FULL   = "gpt-4o"        # heavier tasks: outlet context, pair analysis, synthesis
 
 GDELT_URL    = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-# MediaRank: rank out of 50,695 sources. Top 30% = rank ≤ 15,208.
-# Backend filter only — never shown to users.
-MEDIARANK_TOTAL   = 50_695
-MEDIARANK_CUTOFF  = int(MEDIARANK_TOTAL * 0.30)   # 15,208
+MAX_GDELT_RESULTS       = 50    # max articles fetched from GDELT
+MAX_CANDIDATES_RANK     = 20    # max candidates passed to the topical gate
+MAX_FULLTEXT_CANDIDATES = 10    # max gated candidates we fetch full text for
+MAX_DISPLAY             = 5     # max articles shown to user
 
-MAX_GDELT_RESULTS    = 50    # max articles fetched from GDELT
-MAX_CANDIDATES_RANK  = 20    # max candidates passed to relevance scoring
-MAX_DISPLAY          = 5     # max articles shown to user
+DEBUG_DUMP_DIR = "debug_runs"   # timestamped per-run JSON dumps, for prompt iteration
+
+# Shown verbatim with every set of results. The propaganda model is structural;
+# this line exists so no reader can take the findings as claims about intent.
+STRUCTURAL_NOTE = (
+    "These patterns reflect how news systems are structured — outlet position, "
+    "audience, and sourcing — not the intent of individual journalists."
+)
 
 _gdelt_request_count = 0     # debug counter — tracks GDELT API calls this run
 
@@ -191,32 +205,6 @@ def extract_json(text: str) -> str:
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text)
     return text.strip()
-
-
-# Retained for potential future use — not currently called by the pipeline.
-def load_mediarank_data(filepath: str) -> dict[str, int]:
-    """
-    Loads MediaRank domain → rank from a local CSV.
-    Export from: https://www.media-rank.com/filter#
-    Expected columns: domain, rank
-    Returns empty dict if file not found (filter is then skipped).
-    """
-    ranks: dict[str, int] = {}
-    if not os.path.exists(filepath):
-        print(f"[WARNING] MediaRank file not found at '{filepath}'. Filter skipped.")
-        return ranks
-    with open(filepath, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            domain = row.get("domain", "").lower().strip()
-            rank   = row.get("rank")
-            if domain and rank:
-                try:
-                    ranks[domain] = int(rank)
-                except ValueError:
-                    pass
-    print(f"[INFO] Loaded {len(ranks)} MediaRank ranks from '{filepath}'.")
-    return ranks
 
 
 # ─────────────────────────────────────────────
@@ -421,14 +409,32 @@ def search_gdelt(query: str, startdatetime: str, enddatetime: str, maxrecords: i
     full_url = requests.Request("GET", GDELT_URL, params=params).prepare().url
     print(f"  [DEBUG] GDELT request #{_gdelt_request_count}: {full_url}")
 
+    # Flat 5s wait between every retry — both for rate limits (429) and for
+    # request-level failures (read timeout, connection reset). GDELT is often
+    # slow to hand off the connection, so a timed-out request is retried rather
+    # than allowed to crash the pipeline. Fixed 5s keeps total wait bounded and
+    # avoids the long tail of exponential backoff.
+    RETRY_WAIT = 5
+    response = None
     for attempt in range(5):
-        response = requests.get(GDELT_URL, params=params, timeout=30)
+        try:
+            response = requests.get(GDELT_URL, params=params, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"  [DEBUG] GDELT request failed ({e.__class__.__name__}) on attempt {attempt + 1}.")
+            if attempt < 4:
+                print(f"  [DEBUG] Waiting {RETRY_WAIT}s before retry...")
+                time.sleep(RETRY_WAIT)
+            continue
+
         print(f"  [DEBUG] GDELT HTTP status: {response.status_code} (attempt {attempt + 1})")
         if response.status_code != 429:
             break
-        wait = 6 * (attempt + 1)
-        print(f"  [DEBUG] Rate limited — waiting {wait}s before retry...")
-        time.sleep(wait)
+        print(f"  [DEBUG] Rate limited — waiting {RETRY_WAIT}s before retry...")
+        time.sleep(RETRY_WAIT)
+
+    if response is None:
+        print("  [WARNING] GDELT request failed on every attempt — returning no results.")
+        return {}
 
     try:
         return response.json()
@@ -439,49 +445,12 @@ def search_gdelt(query: str, startdatetime: str, enddatetime: str, maxrecords: i
 
 
 # ─────────────────────────────────────────────
-# STAGE 4 — MEDIARANK SOURCE QUALITY FILTER
-# ─────────────────────────────────────────────
-
-# Retained for potential future use — not currently called by the pipeline.
-def filter_by_mediarank(df: pd.DataFrame, mediarank_lookup: dict[str, int]) -> tuple[pd.DataFrame, list[dict]]:
-    """
-    Applies the MediaRank top-30% cutoff as a backend hard gate.
-    Sources outside the top 30% (rank > 15,208) are dropped.
-    Sources with no rank data are allowed through.
-    Results never shown to users.
-    """
-    if df.empty or not mediarank_lookup:
-        return df, []
-
-    passing    = []
-    rejections = []
-
-    for _, row in df.iterrows():
-        domain = str(row.get("domain", "")).lower().strip()
-        rank   = mediarank_lookup.get(domain)
-
-        if rank is not None and rank > MEDIARANK_CUTOFF:
-            rejections.append({
-                "domain": domain,
-                "rank":   rank,
-                "reason": f"MediaRank rank {rank} is outside top 30% (>{MEDIARANK_CUTOFF}/{MEDIARANK_TOTAL})."
-            })
-        else:
-            passing.append(row)
-
-    passing_df = pd.DataFrame(passing).reset_index(drop=True) if passing else pd.DataFrame()
-    return passing_df, rejections
-
-
-# ─────────────────────────────────────────────
-# STAGE 5 — ARTICLE TYPE CLASSIFICATION
+# STAGE 4 — ARTICLE TYPE CLASSIFICATION
 # ─────────────────────────────────────────────
 #
-# The base article is classified before relevance scoring so the
-# checklist questions adapt to the article type. This prevents the
-# pipeline from being limited to only incident/breaking-news articles.
-#
-# Classification checklist (C1–C6) — all answers stored, nothing is a black box.
+# The base article is classified before the topical gate so that "same event"
+# is interpreted appropriately for the article type. This prevents the pipeline
+# from being limited to only incident/breaking-news articles.
 # ─────────────────────────────────────────────
 
 CLASSIFICATION_SYSTEM = """
@@ -525,174 +494,67 @@ def classify_article(article_text: str, client: OpenAI) -> dict:
 
 
 # ─────────────────────────────────────────────
-# STAGE 6 — RELEVANCE SCORING
+# STAGE 5 — TOPICAL GATE
 # ─────────────────────────────────────────────
 #
-# Design rationale — grounded in Entman (1993) and Boydstun et al. (2014)
-# ────────────────────────────────────────────────────────────────────────
-# Entman (1993) defines framing as selecting aspects of perceived reality and
-# making them salient to promote problem definition, causal interpretation,
-# moral evaluation, or treatment recommendation. Two articles about the same
-# event can foreground entirely different aspects — one centering geopolitical
-# stakes through a Security and defense frame, another centering affected families
-# through a Quality of life or Morality frame. ClearFrame's goal is to surface
-# that second article, not to find five articles that all confirm the first.
+# Deliberately light. Its only job is filtering, not ranking.
 #
-# Relevance is therefore not similarity — it is the degree to which a candidate
-# article expands the set of salient aspects available to the reader. Scoring
-# follows three independent dimensions: topical relevance as a gate, framing
-# divergence as a ranking signal, and affected population salience as a ranking
-# signal. The Boydstun et al. (2014) taxonomy of 15 framing dimensions
-# (Card et al., ACL 2015) provides the controlled vocabulary for framing
-# divergence and affected population salience.
+# Nothing in the propaganda model can be read off a title. Register, voice,
+# presupposition and suppressed alternatives all live in the body of an article,
+# so this stage produces no scores of any kind — only a binary same-event
+# judgment. Scoring happens in Stage 7, after full text is available.
 # ─────────────────────────────────────────────
 
-RELEVANCE_SYSTEM_TEMPLATE = """
-You are scoring candidate news articles against a base article for the ClearFrame system.
+TOPICAL_GATE_SYSTEM = """
+You are filtering candidate news articles against a base article. This is a filter,
+not a ranking. Make one binary judgment per candidate and nothing more.
+
 The base article has been classified as: {primary_type}{secondary_note}.
 
-ClearFrame's purpose is to show readers how the same story looks from different vantage
-points. An article that says something DIFFERENT from the base article is more useful than
-one that confirms it. Your job is not to find the most similar articles — it is to find
-the ones that add the most to the reader's understanding by foregrounding aspects of the
-story that the base article does not.
+For each candidate, using only its title, domain, source country, date, and language,
+decide: is this article about the same underlying event, situation, or subject as the
+base article — interpreted appropriately for the base article's type?
 
-You will score each candidate on THREE independent dimensions. These are a framework for
-structured judgment, not a checklist to fill out mechanically.
+Interpret "same" according to the article type:
+  breaking_news     -> the same specific incident
+  ongoing_situation -> the same ongoing situation, even at a different moment in it
+  economics_policy  -> the same policy, market, or economic condition
+  historical        -> the same historical events or the same background subject
+  human_interest    -> the same community, population, or lived experience
+  mixed             -> use judgment across the above
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DIMENSION 1 — TOPICAL RELEVANCE (binary gate)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Is this candidate article about the same underlying event, situation, or subject as the
-base article — interpreted appropriately for the article type?
+Be inclusive rather than strict: an article covering the same event from an unexpected
+angle, or covering a direct consequence of the event, is topically relevant. An article
+that merely shares a country or a broad theme is not.
 
-This is a yes or no judgment, not a spectrum. If no, set all score fields to null and move
-on. Do not score topically irrelevant articles on the other dimensions — they will be
-excluded regardless of framing.
+Do NOT score, rank, or evaluate framing, tone, or quality. You cannot see the article
+text — only its title and metadata. Any judgment beyond "same subject or not" would be
+unfounded here.
 
-Output: topically_relevant: true or false.
+Coverage patterns in a news system are structural — they follow from an outlet's position,
+its audience, and its sourcing, not from the intent of journalists. Your one-sentence reason
+must never suggest that an outlet or a journalist intended anything.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DIMENSION 2 — FRAMING DIVERGENCE (1–5 ranking signal)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-First, identify the PRIMARY FRAMING DIMENSION of the base article — the single dimension
-that most shapes what the base article treats as the central problem or focus. Record this
-as base_primary_frame. This should be the same value across all candidates since it refers
-to the same base article.
+Return ONLY valid JSON, no markdown fences, as an object with a single key "results"
+whose value is an array with one object per candidate:
 
-Then identify the PRIMARY FRAMING DIMENSION of the candidate article. Record this as
-candidate_primary_frame.
-
-Use the following 15 framing dimensions from Boydstun et al. (2014) and Card et al.
-(ACL 2015) as your reference vocabulary. These are a thinking tool — use whichever ones
-apply and ignore the rest:
-
-  Economic | Capacity and resources | Morality | Fairness and equality |
-  Legality and constitutionality | Policy prescription and evaluation |
-  Crime and punishment | Security and defense | Health and safety |
-  Quality of life | Cultural identity | Public opinion | Political |
-  External regulation and reputation | Other
-
-Score how much the difference between base_primary_frame and candidate_primary_frame
-expands what is salient for the reader:
-
-  5 — The candidate foregrounds a completely different framing dimension than the base
-      article. A reader who only read the base article would encounter an aspect of the
-      story they had no access to. Example: a base article with a Security and defense
-      primary frame paired with a candidate whose primary frame is Quality of life,
-      Morality, or Cultural identity.
-  4 — The candidate foregrounds a meaningfully different dimension, or foregrounds the
-      same dimension but from a clearly different institutional or geographic vantage
-      point that shifts whose interests are centered.
-  3 — The candidate partially overlaps in framing but introduces at least one secondary
-      dimension not present in the base article.
-  2 — The candidate uses mostly the same framing dimensions as the base article but with
-      different facts or emphasis.
-  1 — The candidate is essentially the same article in framing terms — same dimensions,
-      same vantage point, same aspects made salient. Reading it adds nothing beyond
-      confirming what the base article already said.
-
-Output: framing_divergence_score: integer 1–5, or null if topically_relevant is false.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DIMENSION 3 — AFFECTED POPULATION SALIENCE (1–5 ranking signal)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This captures the moral evaluation function of framing (Entman, 1993) — who is centered
-as the primary victim, affected party, or moral subject of the story. It directly captures
-whose experience is made visible.
-
-  5 — The candidate centers a clearly DIFFERENT population as the primary affected group
-      than the base article. Example: the base article centers government or institutional
-      actors and the candidate centers civilians, families, or a specific community
-      experiencing the event on the ground. Especially high-value when the candidate uses
-      Morality, Quality of life, or Cultural identity framing to accomplish this.
-  4 — The candidate shifts whose perspective or experience is foregrounded in a meaningful
-      way, even if the affected group is broadly similar.
-  3 — The candidate partially shifts perspective — some voices or communities appear that
-      were absent in the base article, but the primary affected population is largely the same.
-  2 — The candidate centers the same population with minor variation in whose quotes or
-      experiences are included.
-  1 — The candidate centers exactly the same actors and institutions as the base article.
-      No new population is made visible.
-
-Output: affected_population_score: integer 1–5, or null if topically_relevant is false.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RELATIONSHIP TO BASE (classification — NOT a quality judgment)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This field describes what KIND of relationship the candidate has to the base article so the
-reader understands what they gain from it. It is NOT a quality judgment and does NOT make an
-article better or worse. Do not let a high or low framing/population score push you toward a
-particular value here — they are independent. A corroborating article that confirms contested
-facts across institutionally very different outlets is just as worth surfacing as a reframing
-one; agreement between outlets with different pressures tells the reader the fact is not
-contested or spun.
-
-Pick the SINGLE best fit from exactly these three values:
-
-  "corroborates" — reports substantially the same facts and confirms what the base article
-      said. Its value is trust and certainty: when outlets with very different institutional
-      pressures report the same casualty count or the same sequence of events, that agreement
-      tells the reader the fact is solid.
-  "extends" — adds new facts, populations, or context the base article lacked. Its value is
-      completeness.
-  "reframes" — reports largely the same facts but frames them differently or assigns the
-      problem to different actors. Its value is perspective.
-
-Output: relationship_to_base: one of "corroborates", "extends", or "reframes" (or null if
-topically_relevant is false).
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return ONLY a valid JSON array. No preamble, no markdown fences.
-
-Each item must contain exactly these fields:
 {{
-  "row_index":                <integer matching the candidate's row_index>,
-  "topically_relevant":       true | false,
-  "base_primary_frame":       "<primary Boydstun dimension of the BASE article, or null if topically_relevant is false>",
-  "candidate_primary_frame":  "<primary Boydstun dimension of THIS candidate, or null if topically_relevant is false>",
-  "framing_divergence_score": <integer 1–5, or null if topically_relevant is false>,
-  "affected_population_score":<integer 1–5, or null if topically_relevant is false>,
-  "relationship_to_base":     "corroborates" | "extends" | "reframes" | null if topically_relevant is false,
-  "reasoning":                "<2-3 sentences explaining what specific aspect this candidate makes salient that the base article does not, or why it is topically irrelevant>",
-  "local_perspective":        true | false
+  "results": [
+    {{
+      "row_index":          <integer matching the candidate's row_index>,
+      "topically_relevant": true | false,
+      "reason":             "<one sentence>"
+    }}
+  ]
 }}
 """
 
-def score_candidates(base_text: str, candidates_df: pd.DataFrame,
-                     classification: dict, client: OpenAI) -> list[dict]:
-    """
-    Scores each candidate on three independent dimensions grounded in Entman (1993)
-    and Boydstun et al. (2014):
-      1. topically_relevant — binary gate (true/false)
-      2. framing_divergence_score — 1–5, how much the candidate's primary frame
-         differs from the base article's primary frame
-      3. affected_population_score — 1–5, how much the candidate centers a
-         different affected population than the base article
 
-    Returns the raw JSON array from the LLM, with one dict per candidate.
+def topical_gate(base_text: str, candidates_df: pd.DataFrame,
+                 classification: dict, client: OpenAI) -> list[dict]:
+    """
+    Binary same-event filter over candidate titles/metadata. No scoring of any kind.
+    Returns one dict per candidate: {row_index, topically_relevant, reason}.
     """
     if candidates_df.empty:
         return []
@@ -701,7 +563,7 @@ def score_candidates(base_text: str, candidates_df: pd.DataFrame,
     secondary      = classification.get("secondary_type")
     secondary_note = f" (secondary type: {secondary})" if secondary else ""
 
-    system = RELEVANCE_SYSTEM_TEMPLATE.format(
+    system = TOPICAL_GATE_SYSTEM.format(
         primary_type=primary_type,
         secondary_note=secondary_note
     )
@@ -714,555 +576,777 @@ def score_candidates(base_text: str, candidates_df: pd.DataFrame,
             "domain":        str(row.get("domain", "")),
             "sourcecountry": str(row.get("sourcecountry", "")),
             "seendate":      str(row.get("seendate", "")),
-            "language":      str(row.get("language", ""))
+            "language":      str(row.get("language", "")),
         })
 
     user_prompt = json.dumps({
         "base_article_summary": base_text[:3000],
-        "candidates":           candidates_payload
+        "candidates":           candidates_payload,
     }, ensure_ascii=False)
 
     raw = api_chat(
         client,
         system=system,
         user=user_prompt,
-        max_tokens=4000,
-        model=MODEL_FULL
+        max_tokens=2000,
+        model=MODEL_MINI,
+        response_format={"type": "json_object"},
     )
 
-    return json.loads(extract_json(raw))
+    results = json.loads(extract_json(raw)).get("results", [])
+
+    # A candidate the model returned no verdict for is excluded rather than
+    # silently admitted — a missing verdict is not a passing verdict.
+    seen = {r.get("row_index") for r in results}
+    for i in range(len(candidates_df)):
+        if i not in seen:
+            results.append({
+                "row_index":          i,
+                "topically_relevant": False,
+                "reason":             "No verdict returned by the topical gate.",
+            })
+
+    return sorted(results, key=lambda r: r.get("row_index", 0))
 
 
 # ─────────────────────────────────────────────
-# STAGE 7 — SELECT TOP 5
-# ─────────────────────────────────────────────
-
-def select_top_articles(candidates_df: pd.DataFrame, scored: list[dict],
-                        max_count: int = MAX_DISPLAY) -> pd.DataFrame:
-    """
-    Selects up to max_count articles maximising framing diversity across the final set.
-
-    Selection logic:
-      1. Drop all candidates where topically_relevant is false.
-      2. Compute combined = (framing_divergence_score * 0.6) + (affected_population_score * 0.4).
-         The 0.6 weight reflects that expanding the framing is ClearFrame's primary goal;
-         the 0.4 weight captures the moral evaluation dimension (Entman, 1993).
-      3. Sort by combined descending; tiebreaker: prefer local_perspective = true.
-      4. Relationship balancing: similarity is no longer a penalty. If more than one
-         relationship_to_base type ("corroborates", "extends", "reframes") exists in the
-         pool, guarantee at least one article of each present type — highest-scored of
-         that type — before filling the remaining slots. This gives the reader all three
-         KINDS of value (confirmation, completeness, perspective) when the pool allows it.
-         If only one relationship type is present, fill purely by score / frame diversity.
-      5. Frame diversity pass: fill remaining slots from the sorted list, skipping any
-         candidate whose candidate_primary_frame has already been selected — unless no
-         other candidates remain. This keeps the final set covering as many distinct
-         Boydstun framing dimensions as possible.
-
-    All scoring columns are attached to the output DataFrame for full transparency.
-    """
-    if not scored:
-        return pd.DataFrame()
-
-    # Step 1: drop topically irrelevant candidates
-    topically_relevant = [
-        r for r in scored if r.get("topically_relevant", False)
-    ]
-    if not topically_relevant:
-        return pd.DataFrame()
-
-    # Step 2: compute combined score
-    for r in topically_relevant:
-        fd = r.get("framing_divergence_score") or 0
-        ap = r.get("affected_population_score") or 0
-        r["combined"] = round((fd * 0.6) + (ap * 0.4), 2)
-
-    # Step 3: sort by combined descending, local_perspective as tiebreaker
-    sorted_candidates = sorted(
-        topically_relevant,
-        key=lambda r: (
-            r["combined"],
-            1 if r.get("local_perspective", False) else 0
-        ),
-        reverse=True
-    )
-
-    selected: list[dict] = []
-    selected_ids: set = set()       # row_index of already-selected candidates
-    seen_frames: set[str] = set()
-
-    # Step 4: relationship balancing — surface all three KINDS of value when the
-    # pool allows it. Corroboration and extension are no longer penalised; if more
-    # than one relationship type is present, guarantee at least one article of each
-    # present type (highest-scored of that type) before filling remaining slots by
-    # score. If the pool contains only one relationship type, this is a no-op and we
-    # just fall through to the frame-diversity / score fill below.
-    RELATIONSHIP_TYPES = ["corroborates", "extends", "reframes"]
-    present_types = {
-        r.get("relationship_to_base")
-        for r in sorted_candidates
-        if r.get("relationship_to_base") in RELATIONSHIP_TYPES
-    }
-    if len(present_types) > 1:
-        for rel in RELATIONSHIP_TYPES:
-            if len(selected) >= max_count or rel not in present_types:
-                continue
-            for candidate in sorted_candidates:   # sorted by score desc
-                if candidate["row_index"] in selected_ids:
-                    continue
-                if candidate.get("relationship_to_base") == rel:
-                    selected.append(candidate)
-                    selected_ids.add(candidate["row_index"])
-                    frame = candidate.get("candidate_primary_frame", "") or ""
-                    if frame:
-                        seen_frames.add(frame)
-                    break
-
-    # Step 5: frame diversity pass — fill remaining slots, skipping any candidate
-    # whose candidate_primary_frame is already represented (held back for backfill).
-    deferred: list[dict] = []   # same-frame candidates held back for backfill
-
-    for candidate in sorted_candidates:
-        if len(selected) >= max_count:
-            break
-        if candidate["row_index"] in selected_ids:
-            continue
-        frame = candidate.get("candidate_primary_frame", "") or ""
-        if frame and frame in seen_frames:
-            deferred.append(candidate)
-        else:
-            selected.append(candidate)
-            selected_ids.add(candidate["row_index"])
-            if frame:
-                seen_frames.add(frame)
-
-    # Backfill with deferred (same-frame) candidates if slots remain
-    for candidate in deferred:
-        if len(selected) >= max_count:
-            break
-        if candidate["row_index"] in selected_ids:
-            continue
-        selected.append(candidate)
-        selected_ids.add(candidate["row_index"])
-
-    if not selected:
-        return pd.DataFrame()
-
-    selected_indices = [r["row_index"] for r in selected]
-    selected_df      = candidates_df.iloc[selected_indices].copy().reset_index(drop=True)
-
-    # Attach all scoring columns for full transparency
-    meta_rows = []
-    for r in selected:
-        meta_rows.append({
-            "row_index":                r["row_index"],
-            "base_primary_frame":       r.get("base_primary_frame", ""),
-            "candidate_primary_frame":  r.get("candidate_primary_frame", ""),
-            "framing_divergence_score": r.get("framing_divergence_score"),
-            "affected_population_score":r.get("affected_population_score"),
-            "relationship_to_base":     r.get("relationship_to_base", ""),
-            "combined":                 r["combined"],
-            "reasoning":                r.get("reasoning", ""),
-            "local_perspective":        r.get("local_perspective", False)
-        })
-
-    meta_df = pd.DataFrame(meta_rows).reset_index(drop=True)
-    return pd.concat([selected_df, meta_df.drop(columns=["row_index"])], axis=1)
-
-
-# ─────────────────────────────────────────────
-# STAGE 8 — FULL-TEXT COMPARISON (BrowserUse)
+# STAGE 6 — FULL-TEXT FETCH
 # ─────────────────────────────────────────────
 #
-# For each of the top 5 selected articles, BrowserUse opens a real browser,
-# loads the article URL, and extracts the full text — exactly the same way
-# Stage 1 reads the base article. This solves the same problem: many local
-# news sites in Mexico, Nigeria, Ukraine etc. are JS-rendered or have headers
-# that block trafilatura/requests.
-#
-# Articles are fetched sequentially (not in parallel) to avoid launching
-# multiple Chromium instances at once, which is memory-intensive.
-# Each browser instance is opened and closed per article.
+# Local sources are ordered first: an outlet reporting from inside the country
+# where the event happened sits in a different structural position than a distant
+# one, and pairs across that divide are the most likely to be illuminating.
 # ─────────────────────────────────────────────
 
-FULLTEXT_COMPARISON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "comparisons": {
-            "type":  "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "row_index":                 {"type": "integer"},
-                    "summary":                   {"type": "string"},
-                    "similarities":              {"type": "array", "items": {"type": "string"}},
-                    "differences":               {"type": "array", "items": {"type": "string"}},
-                    "source_country_perspective":{"type": "string"},
-                    "added_value":               {"type": "string"},
-                    "overall_relatedness": {
-                        "type": "string",
-                        "enum": ["very high", "high", "medium", "low"]
-                    },
-                    "framing_contrast":          {"type": "string"},
-                    "comparative_note":          {"type": "string"},
-                    "whose_story":               {"type": "string"}
-                },
-                "required": ["row_index", "summary", "similarities", "differences",
-                             "source_country_perspective", "added_value", "overall_relatedness",
-                             "framing_contrast", "comparative_note", "whose_story"],
-                "additionalProperties": False
-            }
-        }
-    },
-    "required":             ["comparisons"],
-    "additionalProperties": False
+def fetch_candidate_texts(candidates_df: pd.DataFrame, gate_results: list[dict],
+                          event_country: str,
+                          max_candidates: int = MAX_FULLTEXT_CANDIDATES) -> pd.DataFrame:
+    """
+    Fetches full text for the candidates that passed the topical gate.
+
+    Ordering: candidates whose sourcecountry matches the event country come first,
+    then GDELT's original order. Full text is fetched sequentially for the first
+    max_candidates. Candidates whose fetch returns empty text are dropped.
+
+    Returns a DataFrame with an `article_text` column and a `row_index` column
+    pointing back into candidates_df.
+    """
+    passed = [r["row_index"] for r in gate_results if r.get("topically_relevant")]
+    if not passed or candidates_df.empty:
+        return pd.DataFrame()
+
+    event_ctry = normalize_country(event_country)
+
+    def is_local(idx: int) -> bool:
+        row = candidates_df.iloc[idx]
+        return normalize_country(str(row.get("sourcecountry", ""))) == event_ctry
+
+    # Stable sort: local sources first, GDELT order preserved within each group.
+    ordered = sorted(passed, key=lambda idx: 0 if is_local(idx) else 1)
+    n_local = sum(1 for idx in passed if is_local(idx))
+
+    print(f"      {len(passed)} candidate(s) passed the gate "
+          f"({n_local} local to {event_country}, {len(passed) - n_local} non-local).")
+    print(f"      Fetching full text for up to {max_candidates}, local sources first.")
+
+    to_fetch = ordered[:max_candidates]
+    rows: list[dict] = []
+
+    for n, idx in enumerate(to_fetch, start=1):
+        row    = candidates_df.iloc[idx]
+        url    = str(row.get("url", ""))
+        title  = str(row.get("title", ""))
+        domain = str(row.get("domain", ""))
+        tag    = "local" if is_local(idx) else "non-local"
+
+        print(f"      [{n}/{len(to_fetch)}] ({tag}) {domain} — {title[:55]}...")
+        text, _pub_date = get_article_text(url)
+
+        if not text or not text.strip():
+            print("           -> dropped: no text retrieved.")
+            continue
+
+        record = row.to_dict()
+        record["row_index"]    = idx
+        record["article_text"] = text
+        record["is_local"]     = is_local(idx)
+        rows.append(record)
+        print(f"           -> {len(text)} characters.")
+
+    if not rows:
+        print("      No candidate yielded usable full text.")
+        return pd.DataFrame()
+
+    print(f"      {len(rows)} candidate(s) have usable full text.")
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────
+# OUTLET CONTEXT — BACKEND ONLY
+# ─────────────────────────────────────────────
+#
+# What the model recalls about an outlet's ownership is drawn from training data
+# and may be wrong or out of date. It is used only to inform the pair analysis's
+# reasoning about structural position. It is never asserted as fact in any output
+# field, and it is never shown to users.
+# ─────────────────────────────────────────────
+
+_OUTLET_CONTEXT_CACHE: dict[str, dict] = {}   # domain -> context, for this run
+
+OUTLET_CONTEXT_SYSTEM = """
+You are asked what you know, from your training data, about the institutional position
+of a news outlet: who owns it, how it is funded, and what its relationship is to state
+power in the country it operates from.
+
+Accuracy matters far more than completeness. If you are not confident, "unknown" is the
+correct answer. Fabricating or guessing at ownership details is a failure. Do not infer
+ownership from the outlet's name, from its country, or from the general reputation of
+media in that country. If you do not specifically recall this outlet, say so.
+
+Return ONLY valid JSON, no markdown fences:
+
+{
+  "ownership_summary":  "<who owns and funds it, or 'unknown'>",
+  "state_relationship": "<state-owned | state-funded | state-aligned | independent of the state | adversarial to the state | unknown>",
+  "confidence":         "high | medium | low"
 }
 
-FULLTEXT_COMPARISON_SYSTEM = """
-You are comparing full news articles against an original article.
-Respond with a JSON object with a single key "comparisons" whose value is an array — one object per candidate.
+Use confidence "low" whenever you are working from a general impression rather than
+specific recall. Use "unknown" freely.
 
-For each candidate object include exactly these keys:
-  "row_index"                — integer matching the candidate's row_index
-  "summary"                  — 2-3 sentence summary of the candidate article
-  "similarities"             — array of strings: ways it overlaps with the original
-  "differences"              — array of strings: ways it diverges from the original
-  "source_country_perspective" — string: what angle the source country adds (or "unclear")
-  "added_value"              — string: what this article adds that the original lacks
-  "overall_relatedness"      — one of: "very high", "high", "medium", "low"
-  "framing_contrast"         — 1-2 sentences completing this structure: "Where the original article treats this as [X], this article treats it as [Y]." Name the specific framing shift. For example: "Where the original article treats this as a government security problem requiring military response, this article treats it as a community survival crisis experienced by families who have lost income and face daily displacement." If the framing is largely the same, say so plainly.
-  "comparative_note"         — 1-2 sentences. When this article corroborates or largely REPEATS the original's facts, do NOT dismiss it. Hold the shared facts constant and describe what differs in PRESENTATION — emphasis, ordering, what is foregrounded versus buried, what surrounding context is added or omitted. When the underlying facts are identical across the two articles, the framing differences become the only variable, which makes the pair a controlled comparison the reader can learn from. For a corroborating/repeating article, complete this idea: "Both articles report [the shared fact], but where the original [does X with it], this article [does Y]." For a reframing or extending article, the note can instead briefly state what is genuinely new.
-  "whose_story"              — 2 sentences: the first identifying whose experience this article centers as the primary human reality; the second identifying who is present in the original article but absent here, or absent in the original but present here. Be specific — name actual groups, not abstractions like "locals" or "communities."
-
-Focus on: event overlap, geography, actors, timeline, framing, emphasis.
-Infer perspective cautiously from article text, title, and metadata only.
+Describe the outlet's institutional position structurally — ownership, funding, and its
+relationship to state power. Do not characterise the intent of the outlet or its journalists.
 """
 
-def compare_full_text(original_text: str, top_df: pd.DataFrame, client: OpenAI) -> pd.DataFrame:
+
+def get_outlet_context(domain: str, client: OpenAI) -> dict:
     """
-    For each selected article, trafilatura fetches the full text,
-    then the LLM compares each article against the base article.
+    Returns {ownership_summary, state_relationship, confidence} for a domain.
+    Cached per domain for the lifetime of the run.
+    BACKEND ONLY — must never reach a user-facing field.
     """
-    if top_df.empty:
-        return pd.DataFrame()
+    key = str(domain).lower().strip()
+    if key in _OUTLET_CONTEXT_CACHE:
+        return _OUTLET_CONTEXT_CACHE[key]
 
-    top_df = top_df.copy()
+    fallback = {
+        "ownership_summary":  "unknown",
+        "state_relationship": "unknown",
+        "confidence":         "low",
+    }
+    if not key:
+        return fallback
 
-    # Fetch full text for each candidate using trafilatura
-    article_texts = []
-    for i, (_, row) in enumerate(top_df.iterrows()):
-        url   = str(row.get("url", ""))
-        title = str(row.get("title", ""))
-        print(f"      [{i+1}/{len(top_df)}] Fetching: {title[:60]}...")
-        text  = get_article_text(url)
-        article_texts.append(text)
-        if not text:
-            print(f"        → No content retrieved. Comparison will use title/metadata only.")
+    try:
+        raw = api_chat(
+            client,
+            system=OUTLET_CONTEXT_SYSTEM,
+            user=f"News outlet domain: {key}",
+            max_tokens=400,
+            model=MODEL_FULL,
+            response_format={"type": "json_object"},
+        )
+        parsed  = json.loads(extract_json(raw))
+        context = {
+            "ownership_summary":  str(parsed.get("ownership_summary", "unknown")),
+            "state_relationship": str(parsed.get("state_relationship", "unknown")),
+            "confidence":         str(parsed.get("confidence", "low")),
+        }
+    except Exception as e:
+        print(f"      [WARNING] Outlet context lookup failed for {key}: {e}")
+        context = fallback
 
-    top_df["article_text"] = article_texts
-
-    # Build comparison payload for the LLM
-    candidates = []
-    for i, (_, row) in enumerate(top_df.iterrows()):
-        candidates.append({
-            "row_index":     i,
-            "title":         str(row.get("title", "")),
-            "domain":        str(row.get("domain", "")),
-            "language":      str(row.get("language", "")),
-            "sourcecountry": str(row.get("sourcecountry", "")),
-            "seendate":      str(row.get("seendate", "")),
-            "article_text":  str(row.get("article_text", ""))[:6000]
-        })
-
-    user_prompt = json.dumps({
-        "original_article_text": original_text[:6000],
-        "candidates":            candidates
-    }, ensure_ascii=False)
-
-    resp = client.chat.completions.create(
-        model=MODEL_FULL,
-        messages=[
-            {"role": "system", "content": FULLTEXT_COMPARISON_SYSTEM},
-            {"role": "user",   "content": user_prompt}
-        ],
-        max_tokens=4000,
-        response_format={"type": "json_object"}
-    )
-
-    raw             = resp.choices[0].message.content.strip()
-    comparison_data = json.loads(extract_json(raw)).get("comparisons", [])
-    comparison_df   = pd.DataFrame(comparison_data)
-
-    merged = comparison_df.merge(
-        top_df.reset_index(drop=True).reset_index().rename(columns={"index": "row_index"}),
-        on="row_index",
-        how="left"
-    )
-    return merged
+    _OUTLET_CONTEXT_CACHE[key] = context
+    return context
 
 
 # ─────────────────────────────────────────────
-# STAGE 9 — POPULATION ANALYSIS & COVERAGE MAP
+# STAGE 7 — CHOMSKY PAIR ANALYSIS
 # ─────────────────────────────────────────────
 #
-# Grounded in Entman's (1993) concept of moral evaluation in framing:
-# every article implicitly assigns stakes and suffering to certain people
-# over others, and that choice shapes what the reader understands as the
-# problem and who it belongs to. This stage produces a cross-article
-# synthesis — a coverage map — that tells the user whose perspective each
-# outlet centers and what populations are missing from the original article.
+# The heart of the system: one full-text call per candidate, comparing it against
+# the base article through the analytic categories of the propaganda model.
+#
+# Sponsor-congeniality of quoted experts is deliberately EXCLUDED from the
+# categories below. Herman and Chomsky treat the funding of experts as part of the
+# sourcing filter, but think-tank and expert funding is largely undisclosed: the
+# model cannot reliably determine who funds a quoted analyst, so any finding in
+# that category would rest on guesswork. It is left out rather than guessed at.
 # ─────────────────────────────────────────────
 
-POPULATION_ANALYSIS_SYSTEM = """
-You are analyzing a news article through the lens of Entman's (1993) framing theory,
-specifically the moral evaluation component — who is implicitly assigned stakes, suffering,
-or agency in this piece.
+CHOMSKY_CATEGORIES = [
+    "worthy_unworthy_victims",
+    "agency_attribution",
+    "presuppositions_doctrine",
+    "selective_criteria",
+    "suppressed_alternative",
+    "smoke_and_discrepancies",
+]
 
-This is not about labeling ideology or bias. It is about identifying whose experience
-the article treats as the central human reality of the story, and whose is absent or
-reduced to statistics and background.
+CHOMSKY_PAIR_SYSTEM = """
+You are comparing two news articles about the same event through the analytic categories
+of Herman and Chomsky's propaganda model (Manufacturing Consent, 1988).
 
-Return a JSON object with exactly these five keys:
+The model is STRUCTURAL, not conspiratorial. Coverage patterns arise from an outlet's
+position, its audience, and its sourcing — not from the intent of journalists. No editorial
+directive is required for these patterns to appear; the selection happens upstream of any
+individual article. Never write that an outlet or a journalist "hid," "chose to suppress,"
+"deliberately" did anything, or is "producing propaganda." Describe patterns as consequences
+of structure. If you cannot state a finding without attributing intent, the finding is wrong
+as stated — restate it structurally, or drop it.
 
-  "primary_subject" — Who does this article center as the main affected party? Be specific —
-    not "locals" but "fishing families in Sinaloa" or "U.S. border patrol agents." If the
-    article centers an institution rather than people, name the institution and note that
-    individuals are not centered.
+Your job is to find what this PAIR of articles reveals that neither reveals alone.
 
-  "secondary_subjects" — Who else appears in the article but only as context, statistics,
-    or supporting detail? Return as an array of short descriptions.
-
-  "absent_voices" — Based on the event being covered, who would logically have stakes here
-    but does not appear or is only mentioned as an abstraction? This field is relational —
-    reason about who the event affects in the real world and check whether those people are
-    visible in this article. Be specific.
-
-  "implicit_problem_definition" — In one sentence, what does this article implicitly define
-    as the central problem? Whose definition of the problem does this serve?
-
-  "outlet_context" — One sentence noting the outlet name, source country, and whether its
-    geographic or institutional position might explain its centering choices. Keep this
-    neutral and factual.
-
-Return ONLY valid JSON. No preamble, no markdown fences.
-"""
-
-def analyze_article_populations(article_text: str, outlet_name: str,
-                                 source_country: str, client: OpenAI,
-                                 is_base_article: bool = False) -> dict:
-    role_label  = "BASE ARTICLE (the article the user originally read)" if is_base_article else "COMPARISON ARTICLE"
-    user_prompt = (
-        f"Role: {role_label}\nOutlet: {outlet_name}\nSource country: {source_country}\n\n"
-        f"Article text:\n{article_text[:6000]}"
-    )
-    raw = api_chat(
-        client,
-        system=POPULATION_ANALYSIS_SYSTEM,
-        user=user_prompt,
-        max_tokens=800,
-        model=MODEL_FULL,
-        response_format={"type": "json_object"}
-    )
-    return json.loads(extract_json(raw))
-
-
-COVERAGE_MAP_SYSTEM = """
-You have analyzed multiple articles covering the same news event from different outlets.
-Your task is to synthesize what a reader learns by seeing them together versus only reading
-the original article — and to reason explicitly about why that difference matters.
-
-Before producing your output, work through the following four reasoning steps. Store your
-full reasoning in the llm_reasoning field so it can be read and evaluated during development.
+The general analytic move underlying every category is the COUNTERFACTUAL SWAP: would these
+facts have been written in this register if the actors' nationalities or alignments were
+swapped? Would the same things be presupposed? Would the same evaluative criteria apply?
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REASONING CHAIN (stored in llm_reasoning)
+ANTI-OVER-FINDING RULES — READ THESE BEFORE ANYTHING ELSE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"applies": false is a valid and EXPECTED answer.
+
+Most article pairs will exhibit real evidence for only ONE TO THREE of the six categories.
+Flagging many categories on weak evidence is a failure mode, not thoroughness.
+
+Every "applies": true requires AT LEAST ONE VERBATIM QUOTE as evidence. If you cannot quote
+it, it does not apply. Quotes must be copied exactly from the article text you were given —
+never paraphrased, never reconstructed.
+
+If the evidence is a stretch, mark the category not-applicable, or mark it low confidence.
+A pair with one well-evidenced finding is a better result than a pair with six thin ones.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE SIX CATEGORIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Step 1 — What understanding does the base article produce?
-If a reader only read the base article, what would they conclude? Who would they think the
-event happened to? What would they think the central problem is? What solution would feel
-natural given that framing? Be specific — name the actual groups and problem definitions
-the base article produces. (3–5 sentences)
+1. worthy_unworthy_victims
+Compare how the two articles treat the people harmed. Worthy victims receive extensive
+attention, vivid detail, expressions of indignation, and demands for justice. Unworthy
+victims receive a low-key, philosophical register that treats violence as a sad constant of
+the human condition — sober sadness doing the work that suppression would otherwise do.
+Also check RESPONSIBILITY DIRECTION: for worthy victims, responsibility is traced upward to
+leaders and policies; for unworthy victims it is pushed downward to rogue actors, local
+conditions, or tragic excess.
+Also check FACTS WITHOUT RECOGNITION: harm that is on the page but reported in a register
+inappropriate to it — civilian deaths mentioned inside a paragraph about operational
+outcomes, for instance. This is what defeats the defense of "but they reported it."
 
-Step 2 — What does each additional article add or contest?
-For each local article, answer: does this article confirm the base article's understanding,
-extend it with new facts, or reframe it by centering different people or defining a different
-problem? If it reframes, what specifically changes about the reader's understanding? Name
-the concrete difference. (3–5 sentences total across all articles)
+2. agency_attribution
+Compare the causal grammar. When one article names a clear agent with active, unambiguous
+language ("he slaughtered," "forces massacred") and the other renders comparable harm
+agentless — passive voice ("were killed"), agentless nominalization ("a wave of violence"),
+softened vocabulary — that asymmetry is the finding. The killing described as something that
+happened rather than something someone did.
 
-Step 3 — What would the reader have gotten wrong or missed entirely?
-If they only read the base article, what specific misconception or gap would they carry?
-Is there a population they would not know was affected? A factual claim they would treat as
-settled that is actually contested? A solution that would seem obvious that the local framing
-shows is inadequate or harmful? (3–5 sentences)
+3. presuppositions_doctrine
+Identify what each article stands on as axioms rather than as claims to be defended:
+  - definite descriptions that settle contested questions in passing ("the rebels," "the regime")
+  - verbs that assume a motive structure ("defending," "stabilizing," "responding")
+  - modifiers that smuggle judgment ("legitimately elected," "controversial leader")
+  - what is treated as needing explanation, versus what passes as common sense
+  - whose quoted claims are absorbed into the article's own narration, versus held at arm's
+    length as attributed claims
+  - whether a mobilizing ideological enemy is invoked in ways that lower the standard of evidence
+Where the two articles stand on different floors, name both floors.
 
-Step 4 — Why does this matter beyond "getting a different perspective"?
-Push past the generic. Reason about what practical or epistemic difference the additional
-framing makes. Does it change who the reader might hold responsible? Does it reveal that
-the event is still ongoing when the base article implied closure? Does it show that a policy
-the base article treats as a solution is experienced as a harm by affected communities?
-(3–5 sentences)
+4. selective_criteria
+Identify what standards each article invites the reader to judge the event by, and whether the
+chosen criteria are ones the event is positioned to pass. The classic case: an ally's election
+judged by turnout and orderly polling stations, while the criteria that would be applied to an
+adversary's election — whether the opposition could campaign safely, whether the press was
+free, whether the preconditions for a meaningful vote obtained — stay off the page.
+Where the two articles apply different criteria to the same event, name both sets.
+
+5. suppressed_alternative
+Ask whether there is a rival account of this event — one an informed observer outside the
+reporting country's mainstream would recognize as plausible — that one article forecloses so
+completely that the chosen frame reads as the only possible reading. The article does not argue
+against the alternative; the alternative simply is not there, so the reader does not know there
+is something to weigh.
+CRITICALLY: the two articles in this pair can be each other's suppressed alternative. Check
+both directions.
+
+6. smoke_and_discrepancies
+Two narrower checks combined.
+  (a) ARTICLE-LEVEL SMOKE PRODUCTION: does either article accumulate volume around a frame —
+      speculation, peripheral detail, expressions of doubt and interest — while never engaging
+      the substantive questions (motive, quality of evidence) that would adjudicate it?
+  (b) FACTUAL DISCREPANCIES: where do the two articles make incompatible factual claims
+      (casualty counts, sequence of events, who initiated)? Flag the discrepancy WITHOUT
+      adjudicating which is true — you cannot verify facts, only surface disagreement.
+Where the facts AGREE across institutionally very different outlets, that agreement is itself
+worth one sentence: it tells the reader the fact is solid.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONFIDENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Confidence is defined by EVIDENCE STRENGTH, not by how interesting the finding is:
+  "high"   — the pattern is unmistakable and quotable from BOTH articles
+  "medium" — present but partial
+  "low"    — suggestive only
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return ONLY valid JSON, no markdown fences. Include ALL SIX category keys.
+Categories that do not apply need only {"applies": false}.
 
-Return a single JSON object with exactly these six keys:
-
-"llm_reasoning" — A JSON object with exactly four keys:
-  "step1_base_understanding"   : your Step 1 reasoning (3–5 sentences)
-  "step2_article_contributions": your Step 2 reasoning (3–5 sentences)
-  "step3_reader_gaps"          : your Step 3 reasoning (3–5 sentences)
-  "step4_why_it_matters"       : your Step 4 reasoning (3–5 sentences)
-
-"population_landscape" — A list of all distinct affected groups that appear across all
-  articles combined. For each group, note which outlets center them, which mention them
-  peripherally, and which ignore them entirely. Be specific — name actual groups, not
-  abstractions.
-
-"blind_spots" — Which affected populations appear in only one or two of the local articles
-  but not in the base article? What does a reader who only read the base article not know
-  exists? This is the most important field — be specific and name the outlets that reveal
-  each blind spot.
-
-"narrative_tension" — Where do the articles most sharply disagree, not in facts but in who
-  the problem belongs to? Which outlets frame this as a government problem, a security
-  problem, a community survival problem, and so on?
-
-"theory_of_change_explanation" — A plain-language explanation written for the user, 3–4
-  sentences, answering: why should you care that these articles frame the story differently?
-  Do not say "to get a different perspective." Instead name the specific gap that ClearFrame
-  is filling for this particular story. Use your Step 4 reasoning to ground this. This is
-  displayed to the user above the summary.
-
-"user_summary" — 2–3 sentences written for a non-expert reader. Frame it as: these articles
-  tell different stories about who this event affects. Be specific — name actual groups and
-  outlets.
-
-Return ONLY valid JSON. No preamble, no markdown fences.
+{
+  "row_index": <int>,
+  "categories": {
+    "worthy_unworthy_victims": {
+      "applies": true,
+      "confidence": "high" | "medium" | "low",
+      "finding": "<1-2 sentences, structural language only, no intent attribution>",
+      "evidence_base": ["<verbatim quote from the base article>"],
+      "evidence_candidate": ["<verbatim quote from the candidate article>"],
+      "counterfactual_check": "<1 sentence: does this finding survive the swap test?>"
+    },
+    "agency_attribution":       {"applies": false},
+    "presuppositions_doctrine": {"applies": false},
+    "selective_criteria":       {"applies": false},
+    "suppressed_alternative":   {"applies": false},
+    "smoke_and_discrepancies":  {"applies": false}
+  },
+  "why_this_article": "<2-3 plain sentences written FOR THE READER: what does reading this article alongside the original let them see? Lead with the single strongest finding. No jargon, no category names, no intent language.>"
+}
 """
 
-def synthesize_coverage_map(population_analyses: list[dict],
-                             base_article_text: str, client: OpenAI) -> dict:
-    analyses_text = json.dumps(population_analyses, ensure_ascii=False, indent=2)
-    user_prompt = (
-        f"Base article text (first 3000 characters):\n{base_article_text[:3000]}\n\n"
-        f"Per-article population analyses:\n{analyses_text}"
+CHOMSKY_PAIR_USER_TEMPLATE = """\
+BASE ARTICLE — the article the reader is currently reading
+─────────────────────────────────────────────
+{base_text}
+
+CANDIDATE ARTICLE
+Outlet:         {cand_domain}
+Source country: {cand_country}
+Language:       {cand_language}
+Title:          {cand_title}
+─────────────────────────────────────────────
+{cand_text}
+
+─────────────────────────────────────────────
+Possibly unreliable background on the candidate outlet's institutional position.
+Use it only to inform your reasoning about structural position. Never assert it as
+fact in any output field.
+  Ownership:          {ownership_summary}
+  State relationship: {state_relationship}
+  Model's confidence: {confidence}
+─────────────────────────────────────────────
+
+Analyse this pair. The candidate's row_index is {row_index}.
+"""
+
+
+def chomsky_pair_analysis(base_text: str, candidate_row, outlet_context: dict,
+                          client: OpenAI) -> dict:
+    """
+    One full-text pair analysis: base article <-> one candidate.
+    Returns {row_index, categories, why_this_article}.
+    """
+    row_index = int(candidate_row.get("row_index", 0))
+
+    user_prompt = CHOMSKY_PAIR_USER_TEMPLATE.format(
+        base_text=base_text[:7000],
+        cand_domain=str(candidate_row.get("domain", "unknown")),
+        cand_country=str(candidate_row.get("sourcecountry", "unknown")),
+        cand_language=str(candidate_row.get("language", "unknown")),
+        cand_title=str(candidate_row.get("title", "")),
+        cand_text=str(candidate_row.get("article_text", ""))[:7000],
+        ownership_summary=outlet_context.get("ownership_summary", "unknown"),
+        state_relationship=outlet_context.get("state_relationship", "unknown"),
+        confidence=outlet_context.get("confidence", "low"),
+        row_index=row_index,
     )
+
     raw = api_chat(
         client,
-        system=COVERAGE_MAP_SYSTEM,
+        system=CHOMSKY_PAIR_SYSTEM,
         user=user_prompt,
         max_tokens=3000,
         model=MODEL_FULL,
-        response_format={"type": "json_object"}
+        response_format={"type": "json_object"},
     )
-    data = json.loads(extract_json(raw))
 
-    # Print reasoning chain for development inspection
-    reasoning = data.get("llm_reasoning", {})
-    print(f"\n{'─'*70}")
-    print("  [DEV] LLM REASONING CHAIN")
-    print("  " + "=" * 26)
-    for step_key, label in [
-        ("step1_base_understanding",    "Step 1 — Base article understanding"),
-        ("step2_article_contributions", "Step 2 — Article contributions"),
-        ("step3_reader_gaps",           "Step 3 — Reader gaps"),
-        ("step4_why_it_matters",        "Step 4 — Why it matters"),
-    ]:
-        print(f"\n  {label}:\n  {reasoning.get(step_key, '(missing)')}")
-    print(f"\n{'─'*70}\n")
+    try:
+        data = json.loads(extract_json(raw))
+    except json.JSONDecodeError as e:
+        print(f"      [WARNING] Pair analysis returned unparseable JSON for row {row_index}: {e}")
+        return {"row_index": row_index, "categories": _clean_categories({}),
+                "why_this_article": ""}
 
-    return data
+    return {
+        "row_index":        row_index,
+        "categories":       _clean_categories(data.get("categories", {})),
+        "why_this_article": str(data.get("why_this_article", "")).strip(),
+    }
+
+
+def _clean_categories(categories: dict) -> dict:
+    """
+    Normalises the LLM's category output and enforces the evidence rule in code:
+    a category that applies but quotes nothing from either article is demoted to
+    applies: false. The prompt states the rule; this makes it structural.
+    """
+    cleaned: dict[str, dict] = {}
+
+    for name in CHOMSKY_CATEGORIES:
+        cat = categories.get(name)
+        if not isinstance(cat, dict) or not cat.get("applies"):
+            cleaned[name] = {"applies": False}
+            continue
+
+        ev_base = [str(q).strip() for q in cat.get("evidence_base", []) if str(q).strip()]
+        ev_cand = [str(q).strip() for q in cat.get("evidence_candidate", []) if str(q).strip()]
+
+        if not ev_base and not ev_cand:
+            cleaned[name] = {
+                "applies":  False,
+                "_demoted": "applies=true was returned with no verbatim evidence.",
+            }
+            continue
+
+        confidence = str(cat.get("confidence", "low")).lower().strip()
+        if confidence not in CONFIDENCE_WEIGHTS:
+            confidence = "low"
+
+        cleaned[name] = {
+            "applies":              True,
+            "confidence":           confidence,
+            "finding":              str(cat.get("finding", "")).strip(),
+            "evidence_base":        ev_base,
+            "evidence_candidate":   ev_cand,
+            "counterfactual_check": str(cat.get("counterfactual_check", "")).strip(),
+        }
+
+    return cleaned
 
 
 # ─────────────────────────────────────────────
-# DISPLAY HELPERS
+# STAGE 8 — SELECTION BY ILLUMINATION SCORE
+# ─────────────────────────────────────────────
+#
+# The score is computed in Python, not by the LLM, so it is deterministic and
+# debuggable: the same findings always produce the same ranking, and any ranking
+# can be traced back to the categories that produced it.
 # ─────────────────────────────────────────────
 
-def print_results(comparison_df: pd.DataFrame, coverage_map: dict | None = None,
-                  n: int = MAX_DISPLAY):
-    if comparison_df.empty:
-        print("No results to display.")
+CONFIDENCE_WEIGHTS = {"high": 2.0, "medium": 1.0, "low": 0.25}
+
+CATEGORY_WEIGHTS = {
+    "worthy_unworthy_victims":  1.5,
+    "suppressed_alternative":   1.5,
+    "agency_attribution":       1.25,
+    "presuppositions_doctrine": 1.0,
+    "selective_criteria":       1.0,
+    "smoke_and_discrepancies":  1.0,
+}
+
+# Plain-language lens names. The user never sees a raw category key.
+CATEGORY_PLAIN_LABELS = {
+    "worthy_unworthy_victims":  "different treatment of victims",
+    "agency_attribution":       "who did it vs. what happened",
+    "presuppositions_doctrine": "different assumptions",
+    "selective_criteria":       "different standards applied",
+    "suppressed_alternative":   "an account the original leaves out",
+    "smoke_and_discrepancies":  "smoke / factual disagreement",
+}
+
+
+def score_illumination(categories: dict) -> tuple[float, list[dict]]:
+    """
+    Deterministic illumination score, plus a per-category breakdown for debugging.
+
+    The 0.25 weight on low confidence is deliberate: stacking weak findings is nearly
+    worthless, which reinforces the anti-over-finding guard at the scoring level rather
+    than leaving it to the prompt alone.
+    """
+    breakdown: list[dict] = []
+    total = 0.0
+
+    for name, cat in categories.items():
+        if not isinstance(cat, dict) or not cat.get("applies"):
+            continue
+        cat_w  = CATEGORY_WEIGHTS.get(name, 1.0)
+        conf   = str(cat.get("confidence", "low")).lower()
+        conf_w = CONFIDENCE_WEIGHTS.get(conf, CONFIDENCE_WEIGHTS["low"])
+        points = conf_w * cat_w
+        total += points
+        breakdown.append({
+            "category":    name,
+            "confidence":  conf,
+            "conf_weight": conf_w,
+            "cat_weight":  cat_w,
+            "points":      round(points, 3),
+        })
+
+    breakdown.sort(key=lambda b: b["points"], reverse=True)
+    return round(total, 3), breakdown
+
+
+def strongest_category(categories: dict) -> str:
+    """The highest-weighted applying category, ties broken by confidence."""
+    applying = [
+        (name, cat) for name, cat in categories.items()
+        if isinstance(cat, dict) and cat.get("applies")
+    ]
+    if not applying:
+        return ""
+    return max(
+        applying,
+        key=lambda kv: (
+            CATEGORY_WEIGHTS.get(kv[0], 1.0),
+            CONFIDENCE_WEIGHTS.get(str(kv[1].get("confidence", "low")).lower(), 0.25),
+        ),
+    )[0]
+
+
+def select_by_illumination(candidates_df: pd.DataFrame, pair_analyses: list[dict],
+                           event_country: str, max_count: int = MAX_DISPLAY) -> pd.DataFrame:
+    """
+    Ranks analysed pairs by their deterministic illumination score and takes the top
+    max_count. Tiebreaker: a candidate whose sourcecountry matches the event country.
+
+    candidates_df is the full-text DataFrame from Stage 6 (it carries `row_index`).
+    """
+    if candidates_df.empty or not pair_analyses:
+        return pd.DataFrame()
+
+    by_row = {int(row["row_index"]): row for _, row in candidates_df.iterrows()}
+    event_ctry = normalize_country(event_country)
+
+    ranked: list[dict] = []
+    for pa in pair_analyses:
+        idx = int(pa.get("row_index", -1))
+        if idx not in by_row:
+            continue
+        row = by_row[idx]
+        categories       = pa.get("categories", {})
+        score, breakdown = score_illumination(categories)
+        is_local = normalize_country(str(row.get("sourcecountry", ""))) == event_ctry
+        ranked.append({
+            "row_index":         idx,
+            "row":               row,
+            "illumination":      score,
+            "breakdown":         breakdown,
+            "categories":        categories,
+            "why_this_article":  pa.get("why_this_article", ""),
+            "is_local":          is_local,
+        })
+
+    if not ranked:
+        return pd.DataFrame()
+
+    ranked.sort(key=lambda r: (r["illumination"], 1 if r["is_local"] else 0), reverse=True)
+    top = [r for r in ranked if r["illumination"] > 0][:max_count]
+
+    # If nothing scored above zero, no pair produced an evidenced finding. Showing
+    # the highest-ranked zero-score articles would be presenting an empty result as
+    # a finding, so we surface nothing instead.
+    if not top:
+        return pd.DataFrame()
+
+    out = pd.DataFrame([r["row"] for r in top]).reset_index(drop=True)
+    out["illumination_score"] = [r["illumination"] for r in top]
+    out["why_this_article"]   = [r["why_this_article"] for r in top]
+    out["chomsky_findings"]   = [r["categories"] for r in top]
+    out["strongest_category"] = [strongest_category(r["categories"]) for r in top]
+    out["score_breakdown"]    = [r["breakdown"] for r in top]
+    return out
+
+
+# ─────────────────────────────────────────────
+# STAGE 9 — SYNTHESIS
+# ─────────────────────────────────────────────
+
+SYNTHESIS_SYSTEM = """
+You are writing a short synthesis for a reader who has just read one news article. You have
+been given the findings from comparing that article against several others covering the same
+event, analysed through Herman and Chomsky's propaganda model.
+
+The model is STRUCTURAL, not conspiratorial. Coverage patterns follow from an outlet's
+position, its audience, and its sourcing constraints — not from the intent of journalists.
+Never write that an outlet "hid," "chose to suppress," or "deliberately" did anything, and
+never call anything "propaganda by" anyone. Describe patterns as consequences of how the news
+system is structured. No editorial directive is required for these patterns to appear.
+
+Write "overall_synthesis": 3-4 sentences on what these articles collectively let the reader
+see about how this event is covered. Be specific — name the outlets and name the patterns.
+Do not use the analytic category names, and do not use jargon. Do not hedge into generic
+statements like "different outlets have different perspectives"; say what specifically differs
+and what structural position accounts for it.
+
+Return ONLY valid JSON, no markdown fences:
+
+{
+  "overall_synthesis": "<3-4 sentences>"
+}
+"""
+
+
+def synthesize_brief(pair_analyses_selected: list[dict], base_text: str,
+                     client: OpenAI) -> dict:
+    """
+    One call over the selected pairs' findings.
+    Returns {overall_synthesis, structural_note}. structural_note is fixed, never generated.
+    """
+    if not pair_analyses_selected:
+        return {"overall_synthesis": "", "structural_note": STRUCTURAL_NOTE}
+
+    payload = json.dumps({
+        "base_article_excerpt": base_text[:3000],
+        "selected_pairs":       pair_analyses_selected,
+    }, ensure_ascii=False, default=str)
+
+    try:
+        raw  = api_chat(
+            client,
+            system=SYNTHESIS_SYSTEM,
+            user=payload,
+            max_tokens=1200,
+            model=MODEL_FULL,
+            response_format={"type": "json_object"},
+        )
+        synthesis = str(json.loads(extract_json(raw)).get("overall_synthesis", "")).strip()
+    except Exception as e:
+        print(f"      [WARNING] Synthesis failed: {e}")
+        synthesis = ""
+
+    # The note is a constant, not model output — it must never drift.
+    return {"overall_synthesis": synthesis, "structural_note": STRUCTURAL_NOTE}
+
+
+# ─────────────────────────────────────────────
+# DISPLAY — USER-FACING AND DEV SECTIONS
+# ─────────────────────────────────────────────
+#
+# Two audiences, two sections. The user-facing section carries no scores, no
+# category names, and no outlet ownership context. The [DEV] section carries
+# everything, including material that must never be shown to a user.
+# ─────────────────────────────────────────────
+
+def print_user_results(selected_df: pd.DataFrame, synthesis: dict) -> None:
+    """Short, plain-language output. No scores, no category names, no jargon."""
+    print(f"\n{'='*70}")
+    print("  WHAT THESE ARTICLES TOGETHER LET YOU SEE")
+    print(f"{'='*70}\n")
+
+    overall = synthesis.get("overall_synthesis", "").strip()
+    print(overall if overall else "(no synthesis available)")
+
+    print(f"\n{synthesis.get('structural_note', STRUCTURAL_NOTE)}")
+
+    if selected_df.empty:
+        print("\nNo comparison articles surfaced for this story.")
+        print(f"{'='*70}")
         return
 
-    if coverage_map:
-        print(f"\n{'='*70}")
-        print("  COVERAGE MAP — WHO THIS STORY IS ABOUT ACROSS OUTLETS")
-        print(f"{'='*70}")
-        print(f"\nWHY THIS MATTERS:")
-        print(coverage_map.get("theory_of_change_explanation", "(missing)"))
-        print(f"\nIN SHORT:")
-        print(coverage_map.get("user_summary", "(missing)"))
-        print(f"\nWHO APPEARS WHERE:")
-        print(coverage_map.get("population_landscape", "(missing)"))
-        print(f"\nWHAT THE ORIGINAL ARTICLE LEFT OUT:")
-        print(coverage_map.get("blind_spots", "(missing)"))
-        print(f"\nWHERE THE ARTICLES DISAGREE ON WHO OWNS THIS PROBLEM:")
-        print(coverage_map.get("narrative_tension", "(missing)"))
-        print(f"\n{'─'*54}")
-        print("  ARTICLES")
+    print(f"\n{'─'*70}")
+    print("  ARTICLES")
+    print(f"{'─'*70}")
 
-    for i, (_, row) in enumerate(comparison_df.head(n).iterrows(), start=1):
-        title             = row.get("title", "N/A")
-        url               = row.get("url", "")
-        source            = row.get("sourcecountry", "N/A")
-        domain            = row.get("domain", "N/A")
-        language          = row.get("language", "N/A")
-        relatedness       = row.get("overall_relatedness", "N/A")
-        reasoning         = row.get("reasoning", "")
-        summary           = row.get("summary", "")
-        similarities      = row.get("similarities", [])
-        differences       = row.get("differences", [])
-        perspective       = row.get("source_country_perspective", "")
-        added_value       = row.get("added_value", "")
-        framing_contrast  = row.get("framing_contrast", "")
-        comparative_note  = row.get("comparative_note", "")
-        whose_story       = row.get("whose_story", "")
-
-        base_frame     = row.get("base_primary_frame", "N/A")
-        cand_frame     = row.get("candidate_primary_frame", "N/A")
-        fd_score       = row.get("framing_divergence_score", "N/A")
-        ap_score       = row.get("affected_population_score", "N/A")
-        relationship   = row.get("relationship_to_base", "N/A")
-        combined       = row.get("combined", "N/A")
-
-        relationship_value = {
-            "corroborates": "confirms the facts",
-            "extends":      "adds new context",
-            "reframes":     "frames it differently",
-        }.get(relationship, "")
-
-        print(f"\n{'='*70}")
-        print(f"  #{i}  {title}")
-        print(f"  URL                 : {url}")
-        print(f"  Source              : {source} | Domain: {domain} | Language: {language}")
-        print(f"  Base article frame  : {base_frame}")
-        print(f"  This article frame  : {cand_frame}")
-        print(f"  Framing divergence  : {fd_score}/5")
-        print(f"  Affected population : {ap_score}/5")
-        rel_suffix = f"  ({relationship_value})" if relationship_value else ""
-        print(f"  Relationship to original : {relationship}{rel_suffix}")
-        print(f"  Combined            : {combined}")
-        print(f"  Overall related     : {relatedness}")
-        print(f"\n  RELEVANCE REASONING:\n  {reasoning}")
-        if framing_contrast:
-            print(f"\n  FRAMING CONTRAST:\n  {framing_contrast}")
-        if comparative_note:
-            print(f"\n  COMPARATIVE NOTE:\n  {comparative_note}")
-        print(f"\n  SUMMARY:\n  {summary}")
-        print(f"\n  SIMILARITIES:")
-        for s in similarities:
-            print(f"    • {s}")
-        print(f"\n  DIFFERENCES:")
-        for d in differences:
-            print(f"    • {d}")
-        print(f"\n  SOURCE-COUNTRY PERSPECTIVE:\n  {perspective}")
-        if whose_story:
-            print(f"\n  WHOSE STORY:\n  {whose_story}")
-        print(f"\n  ADDED VALUE:\n  {added_value}")
+    for i, (_, row) in enumerate(selected_df.iterrows(), start=1):
+        lens = CATEGORY_PLAIN_LABELS.get(row.get("strongest_category", ""), "")
+        print(f"\n  #{i}  {row.get('title', 'N/A')}")
+        print(f"      {row.get('domain', 'N/A')} · {row.get('sourcecountry', 'N/A')}")
+        if lens:
+            print(f"      Lens: {lens}")
+        print(f"      {row.get('why_this_article', '')}")
+        print(f"      {row.get('url', '')}")
 
     print(f"\n{'='*70}")
+
+
+def print_dev_results(fulltext_df: pd.DataFrame, pair_analyses: list[dict],
+                      outlet_contexts: dict, selected_row_indices: set) -> None:
+    """
+    Verbose developer output for EVERY analysed pair, selected or not:
+    full category table, evidence quotes, counterfactual checks, score breakdown,
+    and the backend-only outlet context.
+    """
+    print(f"\n{'='*70}")
+    print("  [DEV] FULL PAIR ANALYSIS — NOT USER-FACING")
+    print(f"{'='*70}")
+
+    if not pair_analyses:
+        print("\n  [DEV] No pair analyses were produced.")
+        return
+
+    meta = {int(r["row_index"]): r for _, r in fulltext_df.iterrows()} if not fulltext_df.empty else {}
+
+    for pa in sorted(pair_analyses, key=lambda p: p.get("row_index", 0)):
+        idx        = int(pa.get("row_index", -1))
+        row        = meta.get(idx, {})
+        domain     = str(row.get("domain", "unknown"))
+        categories = pa.get("categories", {})
+        score, breakdown = score_illumination(categories)
+        status     = "SELECTED" if idx in selected_row_indices else "not selected"
+
+        print(f"\n{'─'*70}")
+        print(f"  [DEV] row {idx} · {domain} · {row.get('sourcecountry', '?')} · {status}")
+        print(f"        {str(row.get('title', ''))[:70]}")
+        print(f"        illumination score: {score}")
+
+        ctx = outlet_contexts.get(domain, {})
+        print("\n        [BACKEND ONLY — never shown to users] outlet context:")
+        print(f"          ownership          : {ctx.get('ownership_summary', 'unknown')}")
+        print(f"          state relationship : {ctx.get('state_relationship', 'unknown')}")
+        print(f"          model confidence   : {ctx.get('confidence', 'unknown')}")
+
+        print("\n        score breakdown:")
+        if breakdown:
+            for b in breakdown:
+                print(f"          {b['category']:<26} {b['confidence']:<7} "
+                      f"{b['conf_weight']} × {b['cat_weight']} = {b['points']}")
+            print(f"          {'TOTAL':<26} {' '*7} {' '*9} {score}")
+        else:
+            print("          (no categories applied — score 0)")
+
+        print("\n        categories:")
+        for name in CHOMSKY_CATEGORIES:
+            cat = categories.get(name, {"applies": False})
+            if not cat.get("applies"):
+                demoted = cat.get("_demoted")
+                suffix  = f"  [demoted: {demoted}]" if demoted else ""
+                print(f"          {name:<26} applies: False{suffix}")
+                continue
+            print(f"          {name:<26} applies: True  ({cat.get('confidence')})")
+            print(f"            finding    : {cat.get('finding', '')}")
+            for q in cat.get("evidence_base", []):
+                print(f"            base quote : \"{q}\"")
+            for q in cat.get("evidence_candidate", []):
+                print(f"            cand quote : \"{q}\"")
+            print(f"            swap test  : {cat.get('counterfactual_check', '')}")
+
+        print(f"\n        why_this_article: {pa.get('why_this_article', '')}")
+
+    print(f"\n{'='*70}")
+
+
+def dump_debug_run(payload: dict, dump_dir: str = DEBUG_DUMP_DIR) -> str:
+    """
+    Writes the whole run to debug_runs/<timestamp>.json so prompt iterations can be
+    compared run over run. Returns the path written, or "" on failure.
+    """
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path  = os.path.join(dump_dir, f"run_{stamp}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        return path
+    except Exception as e:
+        print(f"  [WARNING] Could not write debug dump: {e}")
+        return ""
+
+
+def _df_records(df: pd.DataFrame, drop: tuple[str, ...] = ()) -> list[dict]:
+    """DataFrame -> JSON-serialisable records, optionally dropping heavy columns."""
+    if df is None or df.empty:
+        return []
+    keep = [c for c in df.columns if c not in drop]
+    return json.loads(df[keep].to_json(orient="records", default_handler=str))
 
 
 # ─────────────────────────────────────────────
@@ -1271,34 +1355,34 @@ def print_results(comparison_df: pd.DataFrame, coverage_map: dict | None = None,
 
 def run_clearframe_pipeline(
     source_url: str,
-    mediarank_filepath: str = "data/mediarank_rankings.csv",
     api_key: str | None = None,
     max_gdelt_results: int = MAX_GDELT_RESULTS,
     max_candidates_rank: int = MAX_CANDIDATES_RANK,
+    max_fulltext: int = MAX_FULLTEXT_CANDIDATES,
     top_n: int = MAX_DISPLAY
 ) -> dict:
     """
-    Full ClearFrame pipeline (v5 — trafilatura edition).
+    Full ClearFrame pipeline, grounded in the Herman/Chomsky propaganda model.
 
     Provide a URL. The pipeline does the rest.
 
     Stages:
-      1  trafilatura fetches the base article
+      1  trafilatura fetches the base article + publication date
       2  LLM builds a structured GDELT query plan
-      3  GDELT returns candidate articles
+      3  GDELT returns candidate articles (+ regional fallback)
       4  LLM classifies the base article type
-      5  LLM makes a holistic relevance judgment for each candidate
-      6  Select top 5 by confidence, local perspective preferred
-      7  trafilatura fetches full text of each selected article, LLM compares
-         + population analysis and coverage map synthesis (Entman 1993)
-         + print and return results
+      5  Topical gate: binary same-event filter on title/metadata
+      6  Full text fetched for up to max_fulltext gated candidates, local sources first
+      7  Chomsky pair analysis: base <-> candidate, full text, per-category findings
+      8  Selection: deterministic illumination score, top N
+      9  Synthesis, display, and a timestamped debug dump
 
     Args:
         source_url          : URL of the article the user is reading
-        mediarank_filepath  : Path to MediaRank CSV (optional, skipped if missing)
         api_key             : OpenAI API key (falls back to OPENAI_API_KEY env var)
         max_gdelt_results   : How many articles to pull from GDELT (default 50)
-        max_candidates_rank : How many to pass to relevance scoring (default 20)
+        max_candidates_rank : How many to pass to the topical gate (default 20)
+        max_fulltext        : How many gated candidates to fetch full text for (default 10)
         top_n               : How many to show to the user (default 5)
 
     Returns:
@@ -1306,8 +1390,19 @@ def run_clearframe_pipeline(
     """
     client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
+    def _early_exit(**extra) -> dict:
+        base = {
+            "source_url": source_url, "article_text": "", "plan": None, "query": None,
+            "gdelt_df": pd.DataFrame(), "classification": None, "gate_results": [],
+            "fulltext_df": pd.DataFrame(), "outlet_contexts": {}, "pair_analyses": [],
+            "selected_df": pd.DataFrame(),
+            "synthesis": {"overall_synthesis": "", "structural_note": STRUCTURAL_NOTE},
+        }
+        base.update(extra)
+        return base
+
     # ── Stage 1: Fetch base article via trafilatura ───────────────────────
-    print("\n[1/7] Fetching base article via trafilatura...")
+    print("\n[1/9] Fetching base article via trafilatura...")
     article_text, pub_date = get_article_text(source_url)
     if not article_text:
         raise ValueError(f"trafilatura could not extract text from: {source_url}")
@@ -1315,19 +1410,21 @@ def run_clearframe_pipeline(
     print(f"      Preview: {article_text[:200]}...\n")
 
     # ── Stage 2: Build GDELT query plan ───────────────────────────────────
-    print("[2/7] Building GDELT query plan...")
+    print("[2/9] Building GDELT query plan...")
     plan               = make_query_plan(article_text, client)
     plan               = clean_plan(plan, max_terms=4)
     query, start_dt, end_dt = build_gdelt_query(
         plan["location"], plan["terms"], plan["source_country"],
         pub_date, plan["window_days_before"], plan["window_days_after"]
     )
+    event_country = plan["source_country"]
     print(f"      Plan     : {plan}")
     print(f"      Query    : {query}")
     print(f"      Date range: {start_dt} → {end_dt}")
+    print(f"      Event country (used to prefer local sources): {event_country}")
 
     # ── Stage 3: Search GDELT ─────────────────────────────────────────────
-    print(f"\n[3/7] Searching GDELT ({start_dt[:8]} to {end_dt[:8]}, max={max_gdelt_results})...")
+    print(f"\n[3/9] Searching GDELT ({start_dt[:8]} to {end_dt[:8]}, max={max_gdelt_results})...")
     gdelt_results = search_gdelt(query, startdatetime=start_dt, enddatetime=end_dt, maxrecords=max_gdelt_results)
     gdelt_df      = pd.DataFrame(gdelt_results.get("articles", []))
     print(f"      GDELT returned {len(gdelt_df)} articles.")
@@ -1362,115 +1459,150 @@ def run_clearframe_pipeline(
 
     if gdelt_df.empty:
         print("      No results from GDELT. Exiting early.")
-        return {"source_url": source_url, "article_text": article_text,
-                "plan": plan, "query": query, "gdelt_df": gdelt_df,
-                "selected_df": pd.DataFrame(), "comparison_df": pd.DataFrame()}
+        return _early_exit(article_text=article_text, plan=plan, query=query)
 
     candidates_df = gdelt_df.head(max_candidates_rank).reset_index(drop=True)
+    print(f"      Passing the first {len(candidates_df)} to the topical gate.")
 
     # ── Stage 4: Classify base article ───────────────────────────────────
-    print(f"\n[4/7] Classifying base article type...")
+    print("\n[4/9] Classifying base article type...")
     classification = classify_article(article_text, client)
     print(f"      Primary type : {classification.get('primary_type')}")
     print(f"      Secondary    : {classification.get('secondary_type')}")
     print(f"      Justification: {classification.get('justification')}")
 
-    # ── Stage 5: Relevance scoring ────────────────────────────────────────
-    print(f"\n[5/7] Judging relevance of {len(candidates_df)} candidates...")
-    scored = score_candidates(article_text, candidates_df, classification, client)
+    common = {"article_text": article_text, "plan": plan, "query": query,
+              "gdelt_df": gdelt_df, "classification": classification}
 
-    print(f"      Scored {len(scored)} candidates")
+    # ── Stage 5: Topical gate ────────────────────────────────────────────
+    print(f"\n[5/9] Topical gate over {len(candidates_df)} candidates "
+          f"(binary same-event filter — no scoring)...")
+    gate_results = topical_gate(article_text, candidates_df, classification, client)
 
-    for r in sorted(scored, key=lambda x: x.get("framing_divergence_score") or 0, reverse=True):
-        relevant   = r.get("topically_relevant", False)
-        fd         = r.get("framing_divergence_score", "n/a") if relevant else "—"
-        ap         = r.get("affected_population_score", "n/a") if relevant else "—"
-        frame      = r.get("candidate_primary_frame", "?") if relevant else "excluded"
-        combined   = round((r.get("framing_divergence_score") or 0) * 0.6 +
-                           (r.get("affected_population_score") or 0) * 0.4, 2) if relevant else "—"
-        print(f"        relevant: {str(relevant):<5}  fd: {fd}/5  ap: {ap}/5  combined: {combined}  frame: {frame}  row {r['row_index']}")
+    n_pass = sum(1 for r in gate_results if r.get("topically_relevant"))
+    for r in gate_results:
+        verdict = "PASS" if r.get("topically_relevant") else "drop"
+        domain  = str(candidates_df.iloc[r["row_index"]].get("domain", "?"))
+        print(f"        [{verdict}] row {r['row_index']:<2} {domain:<28} {r.get('reason', '')}")
+    print(f"      {n_pass}/{len(gate_results)} candidate(s) are about the same event.")
 
-    # ── Stage 6: Select top articles ─────────────────────────────────────
-    print(f"\n[6/7] Selecting top {top_n} articles...")
-    selected_df = select_top_articles(candidates_df, scored, max_count=top_n)
-    print(f"      {len(selected_df)} article(s) selected.")
+    if n_pass == 0:
+        print("      Nothing passed the topical gate. Exiting early.")
+        return _early_exit(**common, gate_results=gate_results)
+
+    # ── Stage 6: Full-text fetch ─────────────────────────────────────────
+    print(f"\n[6/9] Fetching full text (up to {max_fulltext}, local sources first)...")
+    fulltext_df = fetch_candidate_texts(candidates_df, gate_results, event_country,
+                                        max_candidates=max_fulltext)
+    if fulltext_df.empty:
+        print("      No candidate yielded usable full text. Exiting early.")
+        return _early_exit(**common, gate_results=gate_results)
+
+    # ── Stage 7: Chomsky pair analysis ───────────────────────────────────
+    print(f"\n[7/9] Chomsky pair analysis over {len(fulltext_df)} full-text candidate(s)...")
+    print(f"      Each pair is analysed against the base article across "
+          f"{len(CHOMSKY_CATEGORIES)} categories.")
+    print("      'applies: false' is expected — most pairs evidence only 1-3 categories.")
+
+    outlet_contexts: dict[str, dict] = {}
+    pair_analyses:   list[dict]      = []
+
+    for n, (_, row) in enumerate(fulltext_df.iterrows(), start=1):
+        domain = str(row.get("domain", "unknown"))
+        print(f"\n      [{n}/{len(fulltext_df)}] {domain} (row {int(row['row_index'])})")
+
+        ctx = get_outlet_context(domain, client)
+        outlet_contexts[domain] = ctx
+        print(f"           [BACKEND ONLY] outlet context — state relationship: "
+              f"{ctx.get('state_relationship')} (confidence: {ctx.get('confidence')})")
+
+        analysis = chomsky_pair_analysis(article_text, row, ctx, client)
+        pair_analyses.append(analysis)
+
+        applying = [n_ for n_, c in analysis.get("categories", {}).items() if c.get("applies")]
+        score, _ = score_illumination(analysis.get("categories", {}))
+        if applying:
+            print(f"           Applies: {', '.join(applying)}")
+        else:
+            print("           Applies: none — no evidenced finding for this pair.")
+        print(f"           Illumination score: {score}")
+
+    # ── Stage 8: Selection by illumination score ─────────────────────────
+    print(f"\n[8/9] Selecting top {top_n} by illumination score "
+          f"(computed in Python, deterministic)...")
+    selected_df = select_by_illumination(fulltext_df, pair_analyses, event_country,
+                                         max_count=top_n)
 
     if selected_df.empty:
-        print("      No articles passed selection criteria.")
-        return {"source_url": source_url, "article_text": article_text,
-                "plan": plan, "query": query, "gdelt_df": gdelt_df,
-                "classification": classification, "scored": scored,
-                "selected_df": pd.DataFrame(), "comparison_df": pd.DataFrame()}
+        print("      No pair produced an evidenced finding. Nothing to surface.")
+        return _early_exit(**common, gate_results=gate_results,
+                           fulltext_df=fulltext_df, outlet_contexts=outlet_contexts,
+                           pair_analyses=pair_analyses)
 
-    # ── Stage 7: Full-text comparison via trafilatura ────────────────────
-    print(f"\n[7/7] Fetching full text via trafilatura and comparing top {len(selected_df)} articles...")
-    comparison_df = compare_full_text(article_text, selected_df, client)
-    print(f"      Comparison complete for {len(comparison_df)} article(s).")
+    for i, (_, row) in enumerate(selected_df.iterrows(), start=1):
+        print(f"        #{i}  {row['illumination_score']:<6} {row.get('domain', '?'):<28} "
+              f"strongest: {row.get('strongest_category', '—')}")
 
-    # ── Stage 9: Population analysis and coverage map ────────────────────
-    coverage_map      = None
-    population_analyses: list[dict] = []
+    # ── Stage 9: Synthesis and display ───────────────────────────────────
+    print(f"\n[9/9] Synthesising across the {len(selected_df)} selected pair(s)...")
+    selected_rows      = set(int(r) for r in selected_df["row_index"])
+    selected_for_synth = [
+        {
+            "outlet":           str(row.get("domain", "")),
+            "source_country":   str(row.get("sourcecountry", "")),
+            "title":            str(row.get("title", "")),
+            "categories":       row.get("chomsky_findings", {}),
+            "why_this_article": row.get("why_this_article", ""),
+        }
+        for _, row in selected_df.iterrows()
+    ]
+    synthesis = synthesize_brief(selected_for_synth, article_text, client)
+    print("      Synthesis complete.")
 
-    if comparison_df.empty:
-        print("\n[coverage map] Skipping coverage map — no comparison articles available.")
-    else:
-        def _extract_text(val) -> str:
-            """Safely extract plain text from article_text column (may be tuple or str)."""
-            if isinstance(val, tuple):
-                return val[0] if val else ""
-            return str(val) if val else ""
+    print_user_results(selected_df, synthesis)
+    print_dev_results(fulltext_df, pair_analyses, outlet_contexts, selected_rows)
 
-        articles_with_text = [
-            row for _, row in comparison_df.iterrows()
-            if _extract_text(row.get("article_text", "")).strip()
-        ]
-
-        if len(articles_with_text) < 2:
-            print("\n[coverage map] Skipping coverage map — fewer than 2 articles with retrievable full text.")
-        else:
-            print(f"\n[coverage map] Running population analysis across {len(articles_with_text) + 1} articles "
-                  f"(base + {len(articles_with_text)} local)...")
-
-            # Analyze base article
-            base_analysis = analyze_article_populations(
-                article_text, "base article", "base", client, is_base_article=True
-            )
-            base_analysis["_label"] = "BASE ARTICLE"
-            base_analysis["is_base"] = True
-            population_analyses.append(base_analysis)
-            print(f"      [base article] → primary subject: {base_analysis.get('primary_subject', '?')}")
-
-            # Analyze each selected article
-            for _, row in comparison_df.iterrows():
-                text_val     = _extract_text(row.get("article_text", ""))
-                outlet_name  = str(row.get("domain", "unknown"))
-                source_ctry  = str(row.get("sourcecountry", "unknown"))
-                if not text_val.strip():
-                    continue
-                analysis = analyze_article_populations(text_val, outlet_name, source_ctry, client)
-                analysis["_label"] = outlet_name
-                population_analyses.append(analysis)
-                print(f"      [{outlet_name}] → primary subject: {analysis.get('primary_subject', '?')}")
-
-            # Synthesize coverage map
-            print(f"      Synthesizing coverage map...")
-            coverage_map = synthesize_coverage_map(population_analyses, article_text, client)
-
-    # ── Stage 10: Display ────────────────────────────────────────────────
-    print_results(comparison_df, coverage_map=coverage_map, n=top_n)
+    dump_path = dump_debug_run({
+        "timestamp":       datetime.now(timezone.utc).isoformat(),
+        "source_url":      source_url,
+        "plan":            plan,
+        "query":           query,
+        "classification":  classification,
+        "gate_results":    gate_results,
+        "fetched_text_metadata": [
+            {"row_index": int(r["row_index"]), "domain": str(r.get("domain", "")),
+             "url": str(r.get("url", "")), "sourcecountry": str(r.get("sourcecountry", "")),
+             "is_local": bool(r.get("is_local", False)),
+             "text_length": len(str(r.get("article_text", "")))}
+            for _, r in fulltext_df.iterrows()
+        ],
+        "outlet_contexts": outlet_contexts,
+        "pair_analyses":   pair_analyses,
+        "scores": [
+            {"row_index": int(pa["row_index"]),
+             "illumination_score": score_illumination(pa.get("categories", {}))[0],
+             "breakdown":          score_illumination(pa.get("categories", {}))[1]}
+            for pa in pair_analyses
+        ],
+        "selected":  _df_records(selected_df, drop=("article_text",)),
+        "synthesis": synthesis,
+    })
+    if dump_path:
+        print(f"\n  [DEV] Full run dumped to: {dump_path}")
 
     return {
-        "source_url":          source_url,
-        "article_text":        article_text,
-        "plan":                plan,
-        "query":               query,
-        "gdelt_df":            gdelt_df,
-        "classification":      classification,
-        "scored":              scored,
-        "selected_df":         selected_df,
-        "comparison_df":       comparison_df,
-        "population_analyses": population_analyses,
-        "coverage_map":        coverage_map,
+        "source_url":      source_url,
+        "article_text":    article_text,
+        "plan":            plan,
+        "query":           query,
+        "gdelt_df":        gdelt_df,
+        "classification":  classification,
+        "gate_results":    gate_results,
+        "fulltext_df":     fulltext_df,
+        "outlet_contexts": outlet_contexts,
+        "pair_analyses":   pair_analyses,
+        "selected_df":     selected_df,
+        "synthesis":       synthesis,
     }
 
 
@@ -1481,7 +1613,7 @@ def run_clearframe_pipeline(
 if __name__ == "__main__":
 
     # Swap any of these in to test different article types
-    SOURCE_URL = "https://apnews.com/article/philippines-building-collapse-angeles-city-pampanga-clark-6a04bcd1f62ad8d625ab58a87512cd5c"
+    # SOURCE_URL = "https://apnews.com/article/philippines-building-collapse-angeles-city-pampanga-clark-6a04bcd1f62ad8d625ab58a87512cd5c"
     # SOURCE_URL = "https://apnews.com/article/rwanda-genocide-suspect-kabuda-dies-hague-d9c0156deb1359429cb22ea8441974e9"
     # SOURCE_URL = "https://www.washingtonpost.com/world/2026/03/17/us-iran-israel-war-ali-larijani/"
     # SOURCE_URL = "https://www.aljazeera.com/news/2026/3/17/many-killed-wounded-after-blasts-hit-nigerias-maiduguri-witnesses-say"
@@ -1490,9 +1622,6 @@ if __name__ == "__main__":
     # SOURCE_URL = "https://www.cbc.ca/news/world/venezuela-us-influence-trump-9.7122944"
     # SOURCE_URL = "https://www.nytimes.com/2026/03/14/business/media/washington-post-jeff-bezos-layoffs.html"
     # SOURCE_URL = "https://www.reuters.com/world/asia-pacific/hopes-dim-swift-end-iran-war-after-trump-speech-oil-prices-surge-anew-2026-04-02/"
-
-
-    output = run_clearframe_pipeline(
-        source_url=SOURCE_URL,
-        mediarank_filepath="data/mediarank_rankings.csv"  # optional — skipped if not present
-    )
+    # SOURCE_URL = "https://apnews.com/article/iran-war-khamenei-politics-religion-society-a9e0405878db8266e1965d7c0b396243"
+    SOURCE_URL = "https://apnews.com/article/ukraine-russia-war-kyiv-strikes-july-2026-83bcba8bb972ce248a805bc576a7322c"
+    output = run_clearframe_pipeline(source_url=SOURCE_URL)

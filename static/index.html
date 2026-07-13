@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClearFrame — Pipeline Runner</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>ClearFrame</h1>
+  <span class="tag">pipeline runner · debug &amp; validation</span>
+</header>
+<div class="wrap">
+  <form id="form">
+    <input id="url" type="url" placeholder="Paste a news article URL…" autocomplete="off" required>
+    <button id="go" type="submit">Run pipeline</button>
+  </form>
+  <div class="hint">The full 9-stage terminal output streams into the Console below as it runs. Validated results appear in the Results tab.</div>
+
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Idle — paste a URL and run.</span></div>
+
+  <div class="tabs">
+    <button id="tabConsole" class="active">Console</button>
+    <button id="tabResults">Results<span class="count" id="resCount"></span></button>
+  </div>
+  <div class="panel">
+    <div class="toolbar" id="consoleTools">
+      <button id="copyLog">Copy log</button>
+      <button id="clearLog">Clear</button>
+    </div>
+    <pre id="console"></pre>
+    <div id="results" style="display:none"></div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
