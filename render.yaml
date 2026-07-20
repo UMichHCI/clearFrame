@@ -1,0 +1,26 @@
+# Render deployment blueprint for ClearFrame.
+#
+# Deploy: push this repo to GitHub, then on https://render.com create a new
+# "Blueprint" and point it at the repo. Render reads this file and provisions
+# the service below. You'll be prompted to fill in the two secret values.
+#
+# The app is a single long-lived Python process (app.py) that streams the
+# pipeline over SSE, so it must run as a Web Service, NOT a static site or a
+# serverless function (those time out mid-stream).
+services:
+  - type: web
+    name: clearframe
+    runtime: python
+    plan: starter          # SSE + ~30-90s runs need a always-on instance
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0     # accept traffic from outside the container
+      # PORT is injected by Render automatically; app.py reads it.
+      #
+      # No OPENAI_API_KEY here — each visitor enters their own key in the UI and
+      # it's sent per-request, so the host never holds a key or pays for runs.
+      #
+      # CLEARFRAME_PASSWORD is optional now that runs bill the visitor. Add it
+      # (sync: false) only if you also want to restrict *who* can load the page.

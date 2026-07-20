@@ -19,6 +19,8 @@ beyond what run.py already needs. One run streams at a time (this is a local
 debugging tool, not a multi-user server), guarded by a lock.
 """
 
+import base64
+import hmac
 import json
 import mimetypes
 import os
@@ -27,21 +29,26 @@ import sys
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 import pandas as pd
 
 from run import run_clearframe_pipeline, CATEGORY_PLAIN_LABELS
 
-HOST = "127.0.0.1"
-PORT = 8000
+# Bind config. Locally these default to localhost:8000. When hosted (e.g. on
+# Render), set HOST=0.0.0.0 and the platform injects PORT, so the container
+# accepts outside traffic.
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "8000"))
+
+# Optional shared-password gate. If CLEARFRAME_PASSWORD is set, every request
+# must carry HTTP Basic Auth credentials whose password matches. This keeps a
+# public URL from being an open door to your OpenAI spend. Unset = no auth
+# (fine for purely local use). The username is not checked — any value works.
+AUTH_PASSWORD = os.environ.get("CLEARFRAME_PASSWORD", "")
 
 # Directory holding the front end (index.html, style.css, app.js).
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-
-# Only one pipeline run streams at a time. Redirecting sys.stdout is process
-# global, so serialising runs keeps two concurrent runs from interleaving lines.
-_run_lock = threading.Lock()
 
 # Only one pipeline run streams at a time. Redirecting sys.stdout is process
 # global, so serialising runs keeps two concurrent runs from interleaving lines.
@@ -101,8 +108,12 @@ def _summarize_result(result: dict) -> dict:
     return out
 
 
-def stream_pipeline(url: str, sink: "queue.Queue[dict]") -> None:
+def stream_pipeline(url: str, api_key: str, sink: "queue.Queue[dict]") -> None:
     """Run the pipeline, forwarding every printed line to `sink` as an event.
+
+    `api_key` is the caller's own OpenAI key — each visitor brings their own, so
+    runs bill the visitor, not the host. It is passed straight to the pipeline
+    and never stored or logged.
 
     Events pushed to the sink are dicts with a `type`:
       {"type": "line",   "text": str}     one line of terminal output
@@ -118,7 +129,7 @@ def stream_pipeline(url: str, sink: "queue.Queue[dict]") -> None:
         old_stdout = sys.stdout
         sys.stdout = writer
         try:
-            holder["result"] = run_clearframe_pipeline(source_url=url)
+            holder["result"] = run_clearframe_pipeline(source_url=url, api_key=api_key)
         except Exception as e:  # surfaced to the browser, not swallowed
             holder["error"] = f"{e.__class__.__name__}: {e}"
             holder["traceback"] = traceback.format_exc()
@@ -157,16 +168,66 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _authorized(self) -> bool:
+        """True if auth is disabled or the request's Basic-Auth password matches."""
+        if not AUTH_PASSWORD:
+            return True
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(header[len("Basic "):]).decode("utf-8")
+        except Exception:
+            return False
+        _, _, password = decoded.partition(":")
+        return hmac.compare_digest(password, AUTH_PASSWORD)
+
+    def _require_auth(self):
+        """Send a 401 that makes the browser prompt for the shared password."""
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="ClearFrame"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
+        if not self._authorized():
+            self._require_auth()
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send_static("index.html")
-        elif parsed.path == "/run":
-            self._handle_run(parse_qs(parsed.query))
         elif parsed.path.startswith("/static/"):
             self._send_static(parsed.path[len("/static/"):])
         else:
             self.send_error(404, "Not found")
+
+    def do_POST(self):
+        if not self._authorized():
+            self._require_auth()
+            return
+        parsed = urlparse(self.path)
+        if parsed.path == "/run":
+            self._handle_run(self._read_json_body())
+        else:
+            self.send_error(404, "Not found")
+
+    def _read_json_body(self) -> dict:
+        """Parse the request body as JSON, returning {} on any problem.
+
+        The body carries the visitor's URL and their own OpenAI key. It goes in
+        a POST body (not the URL query) precisely so the key never lands in
+        access logs or browser history.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return {}
+        if length <= 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            return {}
 
     def _send_static(self, rel_path: str):
         """Serve a file from ./static, guarding against path traversal."""
@@ -189,9 +250,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
         self.wfile.flush()
 
-    def _handle_run(self, params: dict):
-        urls = params.get("url", [])
-        url = (urls[0].strip() if urls else "")
+    def _handle_run(self, body: dict):
+        url = str(body.get("url", "")).strip()
+        api_key = str(body.get("api_key", "")).strip()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -203,6 +264,12 @@ class Handler(BaseHTTPRequestHandler):
             self._sse({"type": "done"})
             return
 
+        if not api_key:
+            self._sse({"type": "error",
+                       "text": "No OpenAI API key provided. Enter your own key above to run."})
+            self._sse({"type": "done"})
+            return
+
         if not _run_lock.acquire(blocking=False):
             self._sse({"type": "error",
                        "text": "Another run is in progress. Wait for it to finish."})
@@ -210,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         sink: "queue.Queue[dict]" = queue.Queue()
-        producer = threading.Thread(target=stream_pipeline, args=(url, sink), daemon=True)
+        producer = threading.Thread(target=stream_pipeline, args=(url, api_key, sink), daemon=True)
         producer.start()
         try:
             while True:

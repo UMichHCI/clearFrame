@@ -13,10 +13,16 @@
 </header>
 <div class="wrap">
   <form id="form">
-    <input id="url" type="url" placeholder="Paste a news article URL…" autocomplete="off" required>
-    <button id="go" type="submit">Run pipeline</button>
+    <div class="keyrow">
+      <input id="apiKey" type="password" placeholder="Your OpenAI API key (sk-…)" autocomplete="off" spellcheck="false" required>
+      <label class="remember"><input id="remember" type="checkbox"> Remember on this device</label>
+    </div>
+    <div class="urlrow">
+      <input id="url" type="url" placeholder="Paste a news article URL…" autocomplete="off" required>
+      <button id="go" type="submit">Run pipeline</button>
+    </div>
   </form>
-  <div class="hint">The full 9-stage terminal output streams into the Console below as it runs. Validated results appear in the Results tab.</div>
+  <div class="hint">Bring your own OpenAI key — each run bills your account, and your key is sent only to this pipeline, never stored server-side. Get one at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>. The full 9-stage output streams into the Console; validated results appear in the Results tab.</div>
 
   <div class="status"><span class="dot" id="dot"></span><span id="statusText">Idle — paste a URL and run.</span></div>
 
