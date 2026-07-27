@@ -68,6 +68,14 @@ MAX_CANDIDATES_RANK     = 20    # max candidates passed to the topical gate
 MAX_FULLTEXT_CANDIDATES = 10    # max gated candidates we fetch full text for
 MAX_DISPLAY             = 5     # max articles shown to user
 
+# How the topical gate decides same-event relevance:
+#   "metadata" — gate on title/domain/date only, then fetch full text for the
+#                survivors. Cheap; the default.
+#   "fulltext" — fetch full text for every candidate first, then gate on the
+#                article body. More accurate but many more fetches (higher cost
+#                and rate-limit exposure). Set CLEARFRAME_GATE_MODE in .env to flip.
+GATE_MODE = os.environ.get("CLEARFRAME_GATE_MODE", "metadata").strip().lower()
+
 DEBUG_DUMP_DIR = "debug_runs"   # timestamped per-run JSON dumps, for prompt iteration
 
 # Shown verbatim with every set of results. The propaganda model is structural;
@@ -550,11 +558,70 @@ whose value is an array with one object per candidate:
 """
 
 
+# Same task and same type-interpretation as the metadata gate, but the model is
+# now given each candidate's article body, so the "you cannot see the text"
+# constraint is dropped. Still a binary filter — no scoring, tone, or quality
+# judgment (that remains Stage 7's job).
+TOPICAL_GATE_FULLTEXT_SYSTEM = """
+You are filtering candidate news articles against a base article. This is a filter,
+not a ranking. Make one binary judgment per candidate and nothing more.
+
+The base article has been classified as: {primary_type}{secondary_note}.
+
+For each candidate you are given its title, domain, source country, date, language, and
+the article's full text (which may be truncated). Decide: is this article about the same
+underlying event, situation, or subject as the base article — interpreted appropriately
+for the base article's type?
+
+Interpret "same" according to the article type:
+  breaking_news     -> the same specific incident
+  ongoing_situation -> the same ongoing situation, even at a different moment in it
+  economics_policy  -> the same policy, market, or economic condition
+  historical        -> the same historical events or the same background subject
+  human_interest    -> the same community, population, or lived experience
+  mixed             -> use judgment across the above
+
+Be inclusive rather than strict: an article covering the same event from an unexpected
+angle, or covering a direct consequence of the event, is topically relevant. An article
+that merely shares a country or a broad theme is not.
+
+Judge only same-subject-or-not. Do NOT score, rank, or evaluate framing, tone, or quality
+— that happens in a later stage.
+
+Coverage patterns in a news system are structural — they follow from an outlet's position,
+its audience, and its sourcing, not from the intent of journalists. Your one-sentence reason
+must never suggest that an outlet or a journalist intended anything.
+
+Return ONLY valid JSON, no markdown fences, as an object with a single key "results"
+whose value is an array with one object per candidate:
+
+{{
+  "results": [
+    {{
+      "row_index":          <integer matching the candidate's row_index>,
+      "topically_relevant": true | false,
+      "reason":             "<one sentence>"
+    }}
+  ]
+}}
+"""
+
+# Per-candidate body budget when gating on full text — enough of the lead to
+# judge same-event without bloating the prompt across ~20 candidates.
+GATE_FULLTEXT_CHARS = 1500
+
+
 def topical_gate(base_text: str, candidates_df: pd.DataFrame,
-                 classification: dict, client: OpenAI) -> list[dict]:
+                 classification: dict, client: OpenAI,
+                 texts: dict[int, str] | None = None) -> list[dict]:
     """
-    Binary same-event filter over candidate titles/metadata. No scoring of any kind.
+    Binary same-event filter. No scoring of any kind.
     Returns one dict per candidate: {row_index, topically_relevant, reason}.
+
+    If `texts` is given (row_index -> article body), the gate reads the article
+    body ("fulltext" mode) and only judges candidates present in that mapping;
+    every other candidate is marked not-relevant with a note. Otherwise the gate
+    reads title/metadata only ("metadata" mode).
     """
     if candidates_df.empty:
         return []
@@ -563,47 +630,63 @@ def topical_gate(base_text: str, candidates_df: pd.DataFrame,
     secondary      = classification.get("secondary_type")
     secondary_note = f" (secondary type: {secondary})" if secondary else ""
 
-    system = TOPICAL_GATE_SYSTEM.format(
+    use_fulltext = texts is not None
+    template     = TOPICAL_GATE_FULLTEXT_SYSTEM if use_fulltext else TOPICAL_GATE_SYSTEM
+    system       = template.format(
         primary_type=primary_type,
         secondary_note=secondary_note
     )
 
     candidates_payload = []
     for i, (_, row) in enumerate(candidates_df.iterrows()):
-        candidates_payload.append({
+        # In fulltext mode, judge only candidates we actually retrieved text for.
+        if use_fulltext and i not in texts:
+            continue
+        entry = {
             "row_index":     i,
             "title":         str(row.get("title", "")),
             "domain":        str(row.get("domain", "")),
             "sourcecountry": str(row.get("sourcecountry", "")),
             "seendate":      str(row.get("seendate", "")),
             "language":      str(row.get("language", "")),
-        })
+        }
+        if use_fulltext:
+            entry["article_text"] = str(texts[i])[:GATE_FULLTEXT_CHARS]
+        candidates_payload.append(entry)
 
-    user_prompt = json.dumps({
-        "base_article_summary": base_text[:3000],
-        "candidates":           candidates_payload,
-    }, ensure_ascii=False)
+    # Nothing to judge (e.g. every fetch failed) — everyone is dropped below.
+    results: list[dict] = []
+    if candidates_payload:
+        user_prompt = json.dumps({
+            "base_article_summary": base_text[:3000],
+            "candidates":           candidates_payload,
+        }, ensure_ascii=False)
 
-    raw = api_chat(
-        client,
-        system=system,
-        user=user_prompt,
-        max_tokens=2000,
-        model=MODEL_MINI,
-        response_format={"type": "json_object"},
-    )
-
-    results = json.loads(extract_json(raw)).get("results", [])
+        raw = api_chat(
+            client,
+            system=system,
+            user=user_prompt,
+            # Full bodies make the prompt larger; give the response more room too.
+            max_tokens=3000 if use_fulltext else 2000,
+            model=MODEL_MINI,
+            response_format={"type": "json_object"},
+        )
+        results = json.loads(extract_json(raw)).get("results", [])
 
     # A candidate the model returned no verdict for is excluded rather than
-    # silently admitted — a missing verdict is not a passing verdict.
+    # silently admitted — a missing verdict is not a passing verdict. In fulltext
+    # mode, candidates without retrieved text are dropped here for the same reason.
     seen = {r.get("row_index") for r in results}
     for i in range(len(candidates_df)):
         if i not in seen:
+            if use_fulltext and i not in texts:
+                reason = "No full text retrieved, so the gate could not judge it."
+            else:
+                reason = "No verdict returned by the topical gate."
             results.append({
                 "row_index":          i,
                 "topically_relevant": False,
-                "reason":             "No verdict returned by the topical gate.",
+                "reason":             reason,
             })
 
     return sorted(results, key=lambda r: r.get("row_index", 0))
@@ -618,21 +701,24 @@ def topical_gate(base_text: str, candidates_df: pd.DataFrame,
 # one, and pairs across that divide are the most likely to be illuminating.
 # ─────────────────────────────────────────────
 
-def fetch_candidate_texts(candidates_df: pd.DataFrame, gate_results: list[dict],
+def fetch_candidate_texts(candidates_df: pd.DataFrame, indices: list[int],
                           event_country: str,
                           max_candidates: int = MAX_FULLTEXT_CANDIDATES) -> pd.DataFrame:
     """
-    Fetches full text for the candidates that passed the topical gate.
+    Fetches full text for the given candidate row indices.
 
     Ordering: candidates whose sourcecountry matches the event country come first,
     then GDELT's original order. Full text is fetched sequentially for the first
     max_candidates. Candidates whose fetch returns empty text are dropped.
 
+    In "metadata" gate mode, `indices` are the candidates that passed the gate.
+    In "fulltext" gate mode, `indices` are all candidates (the gate runs afterward
+    on the text this fetches).
+
     Returns a DataFrame with an `article_text` column and a `row_index` column
     pointing back into candidates_df.
     """
-    passed = [r["row_index"] for r in gate_results if r.get("topically_relevant")]
-    if not passed or candidates_df.empty:
+    if not indices or candidates_df.empty:
         return pd.DataFrame()
 
     event_ctry = normalize_country(event_country)
@@ -642,11 +728,11 @@ def fetch_candidate_texts(candidates_df: pd.DataFrame, gate_results: list[dict],
         return normalize_country(str(row.get("sourcecountry", ""))) == event_ctry
 
     # Stable sort: local sources first, GDELT order preserved within each group.
-    ordered = sorted(passed, key=lambda idx: 0 if is_local(idx) else 1)
-    n_local = sum(1 for idx in passed if is_local(idx))
+    ordered = sorted(indices, key=lambda idx: 0 if is_local(idx) else 1)
+    n_local = sum(1 for idx in indices if is_local(idx))
 
-    print(f"      {len(passed)} candidate(s) passed the gate "
-          f"({n_local} local to {event_country}, {len(passed) - n_local} non-local).")
+    print(f"      {len(indices)} candidate(s) to fetch "
+          f"({n_local} local to {event_country}, {len(indices) - n_local} non-local).")
     print(f"      Fetching full text for up to {max_candidates}, local sources first.")
 
     to_fetch = ordered[:max_candidates]
@@ -1359,7 +1445,8 @@ def run_clearframe_pipeline(
     max_gdelt_results: int = MAX_GDELT_RESULTS,
     max_candidates_rank: int = MAX_CANDIDATES_RANK,
     max_fulltext: int = MAX_FULLTEXT_CANDIDATES,
-    top_n: int = MAX_DISPLAY
+    top_n: int = MAX_DISPLAY,
+    gate_mode: str = GATE_MODE
 ) -> dict:
     """
     Full ClearFrame pipeline, grounded in the Herman/Chomsky propaganda model.
@@ -1371,8 +1458,9 @@ def run_clearframe_pipeline(
       2  LLM builds a structured GDELT query plan
       3  GDELT returns candidate articles (+ regional fallback)
       4  LLM classifies the base article type
-      5  Topical gate: binary same-event filter on title/metadata
-      6  Full text fetched for up to max_fulltext gated candidates, local sources first
+      5/6  Topical gate + full-text fetch. Order depends on gate_mode:
+             "metadata" — gate on title/metadata (5), then fetch text for survivors (6)
+             "fulltext" — fetch text for all candidates (5), then gate on the body (6)
       7  Chomsky pair analysis: base <-> candidate, full text, per-category findings
       8  Selection: deterministic illumination score, top N
       9  Synthesis, display, and a timestamped debug dump
@@ -1384,11 +1472,19 @@ def run_clearframe_pipeline(
         max_candidates_rank : How many to pass to the topical gate (default 20)
         max_fulltext        : How many gated candidates to fetch full text for (default 10)
         top_n               : How many to show to the user (default 5)
+        gate_mode           : "metadata" (gate on title, then fetch survivors) or
+                              "fulltext" (fetch all candidates, then gate on the body).
+                              Defaults to the CLEARFRAME_GATE_MODE env var.
 
     Returns:
         dict with all intermediate and final outputs for debugging
     """
     client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
+
+    gate_mode = (gate_mode or "metadata").strip().lower()
+    if gate_mode not in ("metadata", "fulltext"):
+        print(f"      [WARNING] Unknown gate_mode '{gate_mode}'; falling back to 'metadata'.")
+        gate_mode = "metadata"
 
     def _early_exit(**extra) -> dict:
         base = {
@@ -1474,26 +1570,67 @@ def run_clearframe_pipeline(
     common = {"article_text": article_text, "plan": plan, "query": query,
               "gdelt_df": gdelt_df, "classification": classification}
 
-    # ── Stage 5: Topical gate ────────────────────────────────────────────
-    print(f"\n[5/9] Topical gate over {len(candidates_df)} candidates "
-          f"(binary same-event filter — no scoring)...")
-    gate_results = topical_gate(article_text, candidates_df, classification, client)
+    def _print_gate(gate_results: list[dict]) -> int:
+        n_pass = sum(1 for r in gate_results if r.get("topically_relevant"))
+        for r in gate_results:
+            verdict = "PASS" if r.get("topically_relevant") else "drop"
+            domain  = str(candidates_df.iloc[r["row_index"]].get("domain", "?"))
+            print(f"        [{verdict}] row {r['row_index']:<2} {domain:<28} {r.get('reason', '')}")
+        print(f"      {n_pass}/{len(gate_results)} candidate(s) are about the same event.")
+        return n_pass
 
-    n_pass = sum(1 for r in gate_results if r.get("topically_relevant"))
-    for r in gate_results:
-        verdict = "PASS" if r.get("topically_relevant") else "drop"
-        domain  = str(candidates_df.iloc[r["row_index"]].get("domain", "?"))
-        print(f"        [{verdict}] row {r['row_index']:<2} {domain:<28} {r.get('reason', '')}")
-    print(f"      {n_pass}/{len(gate_results)} candidate(s) are about the same event.")
+    if gate_mode == "fulltext":
+        # ── Stage 5: Full-text fetch (all candidates) ────────────────────
+        print(f"\n[5/9] Fetching full text for all {len(candidates_df)} candidate(s) "
+              f"(gate_mode='fulltext', local sources first)...")
+        prelim_df = fetch_candidate_texts(
+            candidates_df, list(range(len(candidates_df))), event_country,
+            max_candidates=max_candidates_rank
+        )
+        if prelim_df.empty:
+            print("      No candidate yielded usable full text. Exiting early.")
+            return _early_exit(**common, gate_results=[])
 
-    if n_pass == 0:
-        print("      Nothing passed the topical gate. Exiting early.")
-        return _early_exit(**common, gate_results=gate_results)
+        # ── Stage 6: Topical gate on the fetched full text ───────────────
+        texts = {int(r["row_index"]): str(r["article_text"])
+                 for _, r in prelim_df.iterrows()}
+        print(f"\n[6/9] Topical gate over {len(texts)} full-text candidate(s) "
+              f"(binary same-event filter on the article body — no scoring)...")
+        gate_results = topical_gate(article_text, candidates_df, classification, client,
+                                    texts=texts)
+        n_pass = _print_gate(gate_results)
 
-    # ── Stage 6: Full-text fetch ─────────────────────────────────────────
-    print(f"\n[6/9] Fetching full text (up to {max_fulltext}, local sources first)...")
-    fulltext_df = fetch_candidate_texts(candidates_df, gate_results, event_country,
-                                        max_candidates=max_fulltext)
+        if n_pass == 0:
+            print("      Nothing passed the topical gate. Exiting early.")
+            return _early_exit(**common, gate_results=gate_results)
+
+        # Keep only the survivors that already have text, capped for Stage 7.
+        # prelim_df is already ordered local-first, so head() keeps locals.
+        passed = {r["row_index"] for r in gate_results if r.get("topically_relevant")}
+        fulltext_df = (
+            prelim_df[prelim_df["row_index"].isin(passed)]
+            .head(max_fulltext)
+            .reset_index(drop=True)
+        )
+        print(f"      {len(fulltext_df)} candidate(s) carried into pair analysis "
+              f"(cap {max_fulltext}).")
+    else:
+        # ── Stage 5: Topical gate on title/metadata ──────────────────────
+        print(f"\n[5/9] Topical gate over {len(candidates_df)} candidates "
+              f"(binary same-event filter — no scoring)...")
+        gate_results = topical_gate(article_text, candidates_df, classification, client)
+        n_pass = _print_gate(gate_results)
+
+        if n_pass == 0:
+            print("      Nothing passed the topical gate. Exiting early.")
+            return _early_exit(**common, gate_results=gate_results)
+
+        # ── Stage 6: Full-text fetch (survivors only) ────────────────────
+        print(f"\n[6/9] Fetching full text (up to {max_fulltext}, local sources first)...")
+        passed = [r["row_index"] for r in gate_results if r.get("topically_relevant")]
+        fulltext_df = fetch_candidate_texts(candidates_df, passed, event_country,
+                                            max_candidates=max_fulltext)
+
     if fulltext_df.empty:
         print("      No candidate yielded usable full text. Exiting early.")
         return _early_exit(**common, gate_results=gate_results)

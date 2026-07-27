@@ -22,8 +22,8 @@ The pipeline runs in nine stages:
 2. **Query plan** — an LLM builds a structured GDELT search (location, country, terms, time window).
 3. **Search GDELT** for candidate articles covering the same event (with a regional fallback).
 4. **Classify** the base article's type (breaking news, ongoing situation, policy, historical, human-interest).
-5. **Topical gate** — a lightweight binary "same event?" filter on titles/metadata.
-6. **Full-text fetch** for the candidates that passed, local sources first.
+5. **Topical gate** — a binary "same event?" filter. By default it runs on titles/metadata (cheap); set `CLEARFRAME_GATE_MODE=fulltext` to instead fetch every candidate's full text first and gate on the article body (more accurate, more fetches).
+6. **Full-text fetch** for the candidates that passed, local sources first (in `fulltext` mode this already happened in step 5 and is reused).
 7. **Pair analysis** — each candidate is compared against the base article across six propaganda-model categories, with verbatim-quote evidence required.
 8. **Selection** — a deterministic illumination score (computed in Python) ranks the pairs; top 5 are kept.
 9. **Synthesis + display** — a short reader-facing summary, plus a verbose developer view.
