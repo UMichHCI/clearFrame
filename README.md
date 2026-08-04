@@ -1,4 +1,4 @@
-# ClearFrame
+﻿# ClearFrame
 
 **ClearFrame** takes a news article URL, finds other articles covering the same
 event, and compares them through the analytic categories of Herman & Chomsky's
@@ -7,8 +7,8 @@ propaganda model (*Manufacturing Consent*, 1988) to surface what reading them
 
 There are two ways to run it:
 
-- **Command line** — `run.py`, prints a full 9-stage log to your terminal.
-- **Web UI** — `app.py`, a local page where you paste a URL and watch the same
+- **Command line** â€” `run.py`, prints a full 9-stage log to your terminal.
+- **Web UI** â€” `app.py`, a local page where you paste a URL and watch the same
   output stream live, plus a clean "Results" view. Built for debugging and
   validation.
 
@@ -19,14 +19,14 @@ There are two ways to run it:
 The pipeline runs in nine stages:
 
 1. **Fetch** the base article text + publication date (`trafilatura`).
-2. **Query plan** — an LLM builds a structured GDELT search (location, country, terms, time window).
+2. **Query plan** â€” an LLM builds a structured GDELT search (location, country, terms, time window).
 3. **Search GDELT** for candidate articles covering the same event (with a regional fallback).
 4. **Classify** the base article's type (breaking news, ongoing situation, policy, historical, human-interest).
-5. **Topical gate** — a binary "same event?" filter. By default it runs on titles/metadata (cheap); set `CLEARFRAME_GATE_MODE=fulltext` to instead fetch every candidate's full text first and gate on the article body (more accurate, more fetches).
+5. **Topical gate** â€” a binary "same event?" filter. By default it runs on titles/metadata (cheap); set `CLEARFRAME_GATE_MODE=fulltext` to instead fetch every candidate's full text first and gate on the article body (more accurate, more fetches).
 6. **Full-text fetch** for the candidates that passed, local sources first (in `fulltext` mode this already happened in step 5 and is reused).
-7. **Pair analysis** — each candidate is compared against the base article across six propaganda-model categories, with verbatim-quote evidence required.
-8. **Selection** — a deterministic illumination score (computed in Python) ranks the pairs; top 5 are kept.
-9. **Synthesis + display** — a short reader-facing summary, plus a verbose developer view.
+7. **Pair analysis** â€” each candidate is compared against the base article across six propaganda-model categories, with verbatim-quote evidence required.
+8. **Selection** â€” a deterministic illumination score (computed in Python) ranks the pairs; top 5 are kept.
+9. **Synthesis + display** â€” a short reader-facing summary, plus a verbose developer view.
 
 ---
 
@@ -65,9 +65,9 @@ python app.py
 Then open **<http://localhost:8000>** in your browser, paste an article URL, and
 click **Run pipeline**.
 
-- **Console tab** — the full 9-stage terminal log streams in live as it runs
-  (~30–90s). Good for debugging.
-- **Results tab** — the selected comparison articles and the synthesis, rendered
+- **Console tab** â€” the full 9-stage terminal log streams in live as it runs
+  (~30â€“90s). Good for debugging.
+- **Results tab** â€” the selected comparison articles and the synthesis, rendered
   as clean cards. Good for validation and for non-technical readers.
 
 Press **Ctrl+C** in the terminal to stop the server.
@@ -95,30 +95,44 @@ comparing prompt iterations.
 
 ```
 clearFrame/
-├── run.py              # the pipeline (all 9 stages)
-├── app.py              # local web backend: serves the UI + streams the pipeline
-├── static/             # the web front end
-│   ├── index.html      #   markup
-│   ├── style.css       #   styles
-│   └── app.js          #   client logic
-├── requirements.txt    # Python dependencies
-├── .env.example        # template for your API key
-└── debug_runs/         # per-run JSON dumps (gitignored)
+|-- run.py                  # pipeline orchestrator / public entry point
+|-- app.py                  # local web backend: serves the UI + streams the pipeline
+|-- clearframe/             # pipeline implementation modules
+|   |-- config.py           # shared constants and environment defaults
+|   |-- llm.py              # shared OpenAI call helpers
+|   |-- stage1_fetch.py     # base article fetch
+|   |-- stage2_query_plan.py
+|   |-- stage3_gdelt_search.py
+|   |-- stage4_classify.py
+|   |-- stage5_topical_gate.py
+|   |-- stage6_fulltext.py
+|   |-- stage7_chomsky.py
+|   |-- stage8_selection.py
+|   |-- stage9_synthesis.py
+|   |-- display.py
+|   `-- debug.py
+|-- static/                 # the web front end
+|   |-- index.html          # markup
+|   |-- style.css           # styles
+|   `-- app.js              # client logic
+|-- requirements.txt        # Python dependencies
+|-- .env.example            # template for your API key
+`-- debug_runs/             # per-run JSON dumps (gitignored)
 ```
 
 The web front end (`app.py` + `static/`) uses **only the Python standard
-library** — the dependencies in `requirements.txt` are for the pipeline itself.
+library** â€” the dependencies in `requirements.txt` are for the pipeline itself.
 
 ---
 
 ## Troubleshooting
 
-- **`Address already in use` when starting `app.py`** — a copy is already
+- **`Address already in use` when starting `app.py`** â€” a copy is already
   running. Either just open <http://localhost:8000>, or free the port:
   `lsof -ti :8000 | xargs kill -9` (macOS/Linux).
-- **GDELT `429` / timeouts** — GDELT rate-limits by IP. The pipeline retries a
+- **GDELT `429` / timeouts** â€” GDELT rate-limits by IP. The pipeline retries a
   few times automatically; if it persists, wait a minute and try again.
-- **`trafilatura could not extract text`** — some sites block scrapers or use
+- **`trafilatura could not extract text`** â€” some sites block scrapers or use
   heavy JavaScript. Try a different article URL.
 
 ---
