@@ -3,6 +3,7 @@ venv/
 __pycache__/
 *.pyc
 debug_runs/
+results.json
 
 # macOS metadata
 .DS_Store

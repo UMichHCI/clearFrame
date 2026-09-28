@@ -29,14 +29,19 @@
   <div class="tabs">
     <button id="tabConsole" class="active">Console</button>
     <button id="tabResults">Results<span class="count" id="resCount"></span></button>
+    <button id="tabAnalysis">LLM Analysis<span class="count" id="analysisCount"></span></button>
   </div>
   <div class="panel">
     <div class="toolbar" id="consoleTools">
       <button id="copyLog">Copy log</button>
       <button id="clearLog">Clear</button>
     </div>
+    <div class="toolbar" id="resultsTools" style="display:none">
+      <button id="copyResults" disabled>Copy for Google Docs</button>
+    </div>
     <pre id="console"></pre>
     <div id="results" style="display:none"></div>
+    <div id="analysis" style="display:none"></div>
   </div>
 </div>
 <script src="/static/app.js"></script>

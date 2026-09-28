@@ -1,14 +1,14 @@
-"""
-ClearFrame — local web back end
+﻿"""
+ClearFrame â€” local web back end
 ===============================
 A tiny, zero-dependency HTTP + SSE backend over run.py's pipeline. It does two
 things and nothing more:
 
   1. Serves the static front end from ./static (index.html, style.css, app.js).
   2. Runs the pipeline on /run and STREAMS its terminal output to the browser,
-     line by line, then a structured summary of the selected articles.
+     line by line, then a structured summary and expandable category details.
 
-The front end lives entirely in ./static — no markup, CSS, or JS in this file.
+The front end lives entirely in ./static â€” no markup, CSS, or JS in this file.
 
 Run:
     ./venv/bin/python app.py
@@ -33,7 +33,8 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from run import run_clearframe_pipeline, CATEGORY_PLAIN_LABELS
+from clearframe.prompts import CATEGORY_PLAIN_LABELS
+from run import run_clearframe_pipeline
 
 # Bind config. Locally these default to localhost:8000. When hosted (e.g. on
 # Render), set HOST=0.0.0.0 and the platform injects PORT, so the container
@@ -44,20 +45,24 @@ PORT = int(os.environ.get("PORT", "8000"))
 # Optional shared-password gate. If CLEARFRAME_PASSWORD is set, every request
 # must carry HTTP Basic Auth credentials whose password matches. This keeps a
 # public URL from being an open door to your OpenAI spend. Unset = no auth
-# (fine for purely local use). The username is not checked — any value works.
+# (fine for purely local use). The username is not checked â€” any value works.
 AUTH_PASSWORD = os.environ.get("CLEARFRAME_PASSWORD", "")
 
 # Directory holding the front end (index.html, style.css, app.js).
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# The latest successful Results-tab payload. This intentionally uses one fixed
+# filename so a new run replaces the previous run instead of accumulating files.
+RESULTS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.json")
 
 # Only one pipeline run streams at a time. Redirecting sys.stdout is process
 # global, so serialising runs keeps two concurrent runs from interleaving lines.
 _run_lock = threading.Lock()
 
 
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # STDOUT CAPTURE
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class QueueWriter:
     """A stdout stand-in that pushes each completed line onto a queue."""
@@ -82,36 +87,144 @@ class QueueWriter:
 def _summarize_result(result: dict) -> dict:
     """Pull the user-facing, structured bits out of the pipeline result dict.
 
-    Everything here is safe to show for validation: no outlet ownership context,
-    no raw category keys — just what print_user_results would show, as data.
+    Everything here is safe to show for validation: no raw category keys â€” just what print_user_results would show, as data.
     """
     synthesis = result.get("synthesis") or {}
     out = {
-        "overall_synthesis": (synthesis.get("overall_synthesis") or "").strip(),
+        "summary": (synthesis.get("summary") or "").strip(),
+        "summary_supporting_articles": synthesis.get("summary_supporting_articles", []) or [],
         "structural_note": (synthesis.get("structural_note") or "").strip(),
-        "articles": [],
+        "stop_reason": str(result.get("stop_reason", "") or "").strip(),
+        "categories": [],
+        "analysis_articles": _analysis_articles(result),
     }
 
-    selected = result.get("selected_df")
-    if isinstance(selected, pd.DataFrame) and not selected.empty:
-        for _, row in selected.iterrows():
-            strongest = row.get("strongest_category", "")
-            out["articles"].append({
-                "title": str(row.get("title", "") or ""),
-                "domain": str(row.get("domain", "") or ""),
-                "sourcecountry": str(row.get("sourcecountry", "") or ""),
-                "url": str(row.get("url", "") or ""),
-                "why": str(row.get("why_this_article", "") or ""),
-                "lens": CATEGORY_PLAIN_LABELS.get(strongest, ""),
-                "score": row.get("illumination_score", None),
+    categories = synthesis.get("categories") or {}
+    if isinstance(categories, dict):
+        for key, item in categories.items():
+            if not isinstance(item, dict):
+                continue
+            out["categories"].append({
+                "key": key,
+                "label": CATEGORY_PLAIN_LABELS.get(key, key.replace("_", " ")),
+                "paragraph": str(item.get("paragraph", "") or ""),
+                "supporting_articles": item.get("supporting_articles", []) or [],
             })
+    out["llm_analysis"] = _summarize_llm_analysis(result)
     return out
+
+
+def _analysis_articles(result: dict) -> list[dict]:
+    """Return the source and every comparison article sent to pair analysis."""
+    articles: list[dict] = []
+    seen: set[str] = set()
+
+    source_url = str(result.get("source_url", "") or "").strip()
+    if source_url:
+        plan = result.get("plan") or {}
+        source_country = str(plan.get("original_source_country", "") or "") if isinstance(plan, dict) else ""
+        articles.append({
+            "title": str(result.get("source_title", "") or "Your source article"),
+            "outlet": "",
+            "source_country": source_country,
+            "url": source_url,
+            "role": "source",
+        })
+        seen.add(source_url)
+
+    pair_analyses = result.get("pair_analyses") or []
+    if not isinstance(pair_analyses, list):
+        return articles
+
+    for pair in pair_analyses:
+        if not isinstance(pair, dict):
+            continue
+        reference = pair.get("article_reference") or {}
+        if not isinstance(reference, dict):
+            continue
+        url = str(reference.get("url", "") or "").strip()
+        identity = url or "|".join([
+            str(reference.get("title", "") or "").strip(),
+            str(reference.get("outlet", "") or "").strip(),
+        ])
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        articles.append({
+            "title": str(reference.get("title", "") or "Untitled"),
+            "outlet": str(reference.get("outlet", "") or ""),
+            "source_country": str(reference.get("source_country", "") or ""),
+            "url": url,
+            "role": "comparison",
+        })
+
+    return articles
+
+
+def _summarize_llm_analysis(result: dict) -> dict:
+    """Structured LLM outputs for inspection. Raw article bodies are omitted."""
+    synthesis = result.get("synthesis") or {}
+    pair_analyses = result.get("pair_analyses") or []
+
+    return {
+        "source_extraction": result.get("source_analysis") or {},
+        "pair_extractions": _strip_source_from_pair_extractions(pair_analyses),
+        "category_synthesis": {
+            "summary": (synthesis.get("summary") or "").strip(),
+            "summary_supporting_articles": synthesis.get("summary_supporting_articles", []) or [],
+            "categories": synthesis.get("categories") or {},
+            "category_decisions": synthesis.get("category_decisions") or {},
+        },
+    }
+
+
+def _write_results_json(result_summary: dict) -> None:
+    """Overwrite results.json with exactly the data rendered in the Results tab."""
+    results_tab_data = {
+        key: value
+        for key, value in result_summary.items()
+        if key != "llm_analysis"
+    }
+    with open(RESULTS_JSON_PATH, "w", encoding="utf-8") as results_file:
+        json.dump(results_tab_data, results_file, ensure_ascii=False, indent=2)
+        results_file.write("\n")
+
+
+def _strip_source_from_pair_extractions(pair_analyses) -> list[dict]:
+    if not isinstance(pair_analyses, list):
+        return []
+
+    stripped: list[dict] = []
+    for pair in pair_analyses:
+        if not isinstance(pair, dict):
+            continue
+        category_answers = {}
+        answers = pair.get("category_answers") or {}
+        if isinstance(answers, dict):
+            for category, answer in answers.items():
+                if not isinstance(answer, dict):
+                    continue
+                cleaned = {
+                    "comparison_article": answer.get("comparison_article", {}),
+                    "meaningful_difference": answer.get("meaningful_difference", False),
+                    "difference": answer.get("difference", ""),
+                    "source_basis": answer.get("source_basis", []),
+                    "comparison_basis": answer.get("comparison_basis", []),
+                }
+                category_answers[category] = cleaned
+
+        stripped.append({
+            "row_index": pair.get("row_index"),
+            "article_reference": pair.get("article_reference") or {},
+            "category_answers": category_answers,
+        })
+    return stripped
 
 
 def stream_pipeline(url: str, api_key: str, sink: "queue.Queue[dict]") -> None:
     """Run the pipeline, forwarding every printed line to `sink` as an event.
 
-    `api_key` is the caller's own OpenAI key — each visitor brings their own, so
+    `api_key` is the caller's own OpenAI key â€” each visitor brings their own, so
     runs bill the visitor, not the host. It is passed straight to the pipeline
     and never stored or logged.
 
@@ -149,22 +262,24 @@ def stream_pipeline(url: str, api_key: str, sink: "queue.Queue[dict]") -> None:
 
     if "error" in holder:
         sink.put({"type": "line", "text": ""})
-        sink.put({"type": "line", "text": "──────────── PIPELINE ERROR ────────────"})
+        sink.put({"type": "line", "text": "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ PIPELINE ERROR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"})
         for tb_line in (holder.get("traceback", "")).splitlines():
             sink.put({"type": "line", "text": tb_line})
         sink.put({"type": "error", "text": holder["error"]})
     else:
-        sink.put({"type": "result", "data": _summarize_result(holder.get("result", {}))})
+        result_summary = _summarize_result(holder.get("result", {}))
+        _write_results_json(result_summary)
+        sink.put({"type": "result", "data": result_summary})
 
     sink.put({"type": "done"})
 
 
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # HTTP HANDLER
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class Handler(BaseHTTPRequestHandler):
-    # Quieter logging — the pipeline's own output is what matters.
+    # Quieter logging â€” the pipeline's own output is what matters.
     def log_message(self, fmt, *args):
         pass
 
@@ -298,9 +413,9 @@ def main():
         server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError as e:
         if e.errno == 48:  # EADDRINUSE
-            print(f"Port {PORT} is already in use — ClearFrame is probably already running.")
-            print(f"  • Just open http://{HOST}:{PORT} in your browser, or")
-            print(f"  • Free the port with:  lsof -ti :{PORT} | xargs kill -9")
+            print(f"Port {PORT} is already in use â€” ClearFrame is probably already running.")
+            print(f"  â€¢ Just open http://{HOST}:{PORT} in your browser, or")
+            print(f"  â€¢ Free the port with:  lsof -ti :{PORT} | xargs kill -9")
             return
         raise
     print(f"ClearFrame UI running at http://{HOST}:{PORT}")
@@ -314,3 +429,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
