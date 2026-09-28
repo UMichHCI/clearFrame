@@ -1,17 +1,17 @@
 ﻿import pandas as pd
 
-from .config import MAX_FULLTEXT_CANDIDATES
 from .stage1_fetch import get_article_text
 from .stage2_query_plan import normalize_country
+
+
 def fetch_candidate_texts(candidates_df: pd.DataFrame, indices: list[int],
-                          event_country: str,
-                          max_candidates: int = MAX_FULLTEXT_CANDIDATES) -> pd.DataFrame:
+                          event_country: str) -> pd.DataFrame:
     """
     Fetches full text for the given candidate row indices.
 
     Ordering: candidates whose sourcecountry matches the event country come first,
-    then GDELT's original order. Full text is fetched sequentially for the first
-    max_candidates. Candidates whose fetch returns empty text are dropped.
+    then GDELT's original order. Full text is fetched for every provided index.
+    Candidates whose fetch returns empty text are dropped.
 
     In "metadata" gate mode, `indices` are the candidates that passed the gate.
     In "fulltext" gate mode, `indices` are all candidates (the gate runs afterward
@@ -35,9 +35,9 @@ def fetch_candidate_texts(candidates_df: pd.DataFrame, indices: list[int],
 
     print(f"      {len(indices)} candidate(s) to fetch "
           f"({n_local} local to {event_country}, {len(indices) - n_local} non-local).")
-    print(f"      Fetching full text for up to {max_candidates}, local sources first.")
+    print("      Fetching full text for every candidate, local sources first.")
 
-    to_fetch = ordered[:max_candidates]
+    to_fetch = ordered
     rows: list[dict] = []
 
     for n, idx in enumerate(to_fetch, start=1):

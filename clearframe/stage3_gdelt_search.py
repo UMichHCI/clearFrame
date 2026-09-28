@@ -5,6 +5,12 @@ import requests
 from .config import COUNTRY_FALLBACK, FALLBACK_DEFAULT, GDELT_URL
 
 _gdelt_request_count = 0
+
+
+def normalize_country(text: str) -> str:
+    return str(text).strip().lower().replace(" ", "")
+
+
 def get_fallback_domain(country: str) -> str:
     """Returns the regional fallback domain for a given country, or FALLBACK_DEFAULT."""
     return COUNTRY_FALLBACK.get(country.lower().strip(), FALLBACK_DEFAULT)
@@ -80,4 +86,71 @@ def search_gdelt(query: str, startdatetime: str, enddatetime: str, maxrecords: i
         print("[WARNING] GDELT did not return valid JSON:")
         print(response.text[:500])
         return {}
+
+
+def search_gdelt_balanced(
+    query: str,
+    query_countries: list[str],
+    startdatetime: str,
+    enddatetime: str,
+    maxrecords_per_country: int = 10,
+    overfetch_factor: int = 3,
+) -> list[dict]:
+    """
+    Runs one combined GDELT DOC API request, then caps locally per source country.
+
+    The overfetch gives lower-volume countries a better chance to appear in the
+    combined result set while avoiding one GDELT API call per country.
+    Returns a flat, URL-deduplicated article list with a `query_country` field
+    matching the article's sourcecountry when it is one of the query countries.
+    """
+    country_lookup: dict[str, str] = {}
+    for country in query_countries:
+        normalized = normalize_country(country)
+        if normalized and normalized not in country_lookup:
+            country_lookup[normalized] = country
+
+    if not country_lookup:
+        return []
+
+    maxrecords = maxrecords_per_country * len(country_lookup) * max(1, overfetch_factor)
+    print(f"      Combined GDELT request: max {maxrecords} "
+          f"({maxrecords_per_country} per country target, overfetch x{max(1, overfetch_factor)})")
+
+    results = search_gdelt(
+        query,
+        startdatetime=startdatetime,
+        enddatetime=enddatetime,
+        maxrecords=maxrecords,
+    )
+
+    articles: list[dict] = []
+    seen_urls: set[str] = set()
+    counts: dict[str, int] = {country: 0 for country in country_lookup}
+
+    for raw_article in results.get("articles", []):
+        if not isinstance(raw_article, dict):
+            continue
+
+        normalized_country = normalize_country(raw_article.get("sourcecountry", ""))
+        if normalized_country not in country_lookup:
+            continue
+        if counts[normalized_country] >= maxrecords_per_country:
+            continue
+
+        url = str(raw_article.get("url", "")).strip()
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+
+        article = dict(raw_article)
+        article["query_country"] = country_lookup[normalized_country]
+        articles.append(article)
+        counts[normalized_country] += 1
+
+    for normalized, original in country_lookup.items():
+        print(f"        {original}: {counts[normalized]} retained article(s)")
+
+    return articles
 

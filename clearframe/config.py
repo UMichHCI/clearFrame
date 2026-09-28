@@ -8,9 +8,10 @@ MODEL_FULL   = "gpt-4o"        # heavier tasks: outlet context, pair analysis, s
 
 GDELT_URL    = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-MAX_GDELT_RESULTS       = 50    # max articles fetched from GDELT
+MAX_GDELT_RESULTS       = 50    # deprecated: old global GDELT cap
+GDELT_RESULTS_PER_COUNTRY = 10  # max retained GDELT articles per query country
+GDELT_OVERFETCH_FACTOR = 3      # combined request size multiplier before local capping
 MAX_CANDIDATES_RANK     = 20    # deprecated: all gathered GDELT candidates now go to the topical gate
-MAX_FULLTEXT_CANDIDATES = 10    # max gated candidates we fetch full text for
 MAX_DISPLAY             = 5     # max articles shown to user
 
 # How the topical gate decides same-event relevance:

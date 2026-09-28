@@ -6,21 +6,22 @@ public run_clearframe_pipeline() entry point used by app.py and command-line run
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import pandas as pd
 from openai import OpenAI
 
 from clearframe.config import (
+    GDELT_OVERFETCH_FACTOR,
+    GDELT_RESULTS_PER_COUNTRY,
     GATE_MODE,
     GDELT_FALLBACK_THRESHOLD,
     MAX_CANDIDATES_RANK,
-    MAX_DISPLAY,
-    MAX_FULLTEXT_CANDIDATES,
     MAX_GDELT_RESULTS,
     STRUCTURAL_NOTE,
 )
-from clearframe.debug import _df_records, dump_debug_run
+from clearframe.debug import dump_debug_run
 from clearframe.display import print_dev_results, print_user_results
 from clearframe.stage1_fetch import get_article_text
 from clearframe.stage2_query_plan import (
@@ -29,22 +30,25 @@ from clearframe.stage2_query_plan import (
     make_query_plan,
     quote_if_needed,
 )
-from clearframe.stage3_gdelt_search import get_fallback_domain, search_gdelt, search_gdelt_fallback
-from clearframe.stage4_classify import classify_article
+from clearframe.stage3_gdelt_search import get_fallback_domain, search_gdelt_balanced, search_gdelt_fallback
 from clearframe.stage5_topical_gate import topical_gate
 from clearframe.stage6_fulltext import fetch_candidate_texts
-from clearframe.stage7_chomsky import CHOMSKY_CATEGORIES, chomsky_pair_analysis, get_outlet_context
-from clearframe.stage8_selection import CATEGORY_PLAIN_LABELS, score_illumination, select_by_illumination
-from clearframe.stage9_synthesis import synthesize_brief
+from clearframe.prompts import CHOMSKY_CATEGORIES, COMPARATIVE_CATEGORIES, SINGLE_ARTICLE_CATEGORIES
+from clearframe.stage7_chomsky import chomsky_pair_analysis, extract_source_article_analysis
+from clearframe.stage8_selection import CATEGORY_PLAIN_LABELS
+from clearframe.stage9_synthesis import synthesize_category_paragraphs
+
+PAIR_ANALYSIS_MAX_WORKERS = 6
 
 
 def run_clearframe_pipeline(
     source_url: str,
     api_key: str | None = None,
     max_gdelt_results: int = MAX_GDELT_RESULTS,
+    gdelt_results_per_country: int = GDELT_RESULTS_PER_COUNTRY,
+    gdelt_overfetch_factor: int = GDELT_OVERFETCH_FACTOR,
     max_candidates_rank: int = MAX_CANDIDATES_RANK,
-    max_fulltext: int = MAX_FULLTEXT_CANDIDATES,
-    top_n: int = MAX_DISPLAY,
+    top_n: int | None = None,
     gate_mode: str = GATE_MODE
 ) -> dict:
     """
@@ -54,23 +58,24 @@ def run_clearframe_pipeline(
 
     Stages:
       1  trafilatura fetches the base article + publication date
-      2  LLM builds a structured GDELT query plan
+      2  LLM builds a structured GDELT query plan, including article type
       3  GDELT returns candidate articles (+ regional fallback)
-      4  LLM classifies the base article type
+      4  Reuse the query plan's article type for topical relevance
       5/6  Topical gate + full-text fetch. Order depends on gate_mode:
              "metadata" â€” gate on title/metadata (5), then fetch text for survivors (6)
              "fulltext" â€” fetch text for all candidates (5), then gate on the body (6)
       7  Chomsky pair analysis: base <-> candidate, full text, per-category findings
-      8  Selection: deterministic illumination score, top N
-      9  Synthesis, display, and a timestamped debug dump
+      8  Category synthesis: meaningful differences only, no ranking
+      9  Display and a timestamped debug dump
 
     Args:
         source_url          : URL of the article the user is reading
         api_key             : OpenAI API key (falls back to OPENAI_API_KEY env var)
-        max_gdelt_results   : How many articles to pull from GDELT (default 50)
+        max_gdelt_results   : Deprecated; use gdelt_results_per_country instead
+        gdelt_results_per_country: How many GDELT articles to request per query country
+        gdelt_overfetch_factor: Combined GDELT request multiplier before per-country capping
         max_candidates_rank : Deprecated; all gathered GDELT articles now go to the topical gate
-        max_fulltext        : How many gated candidates to fetch full text for (default 10)
-        top_n               : How many to show to the user (default 5)
+        top_n               : Deprecated; final output is category-based and unranked
         gate_mode           : "metadata" (gate on title, then fetch survivors) or
                               "fulltext" (fetch all candidates, then gate on the body).
                               Defaults to the CLEARFRAME_GATE_MODE env var.
@@ -88,10 +93,10 @@ def run_clearframe_pipeline(
     def _early_exit(**extra) -> dict:
         base = {
             "source_url": source_url, "article_text": "", "plan": None, "query": None,
-            "gdelt_df": pd.DataFrame(), "classification": None, "gate_results": [],
-            "fulltext_df": pd.DataFrame(), "outlet_contexts": {}, "pair_analyses": [],
+            "gdelt_df": pd.DataFrame(), "article_type": None, "gate_results": [],
+            "fulltext_df": pd.DataFrame(), "pair_analyses": [],
             "selected_df": pd.DataFrame(),
-            "synthesis": {"overall_synthesis": "", "structural_note": STRUCTURAL_NOTE},
+            "synthesis": {"summary": "", "categories": {}, "structural_note": STRUCTURAL_NOTE},
         }
         base.update(extra)
         return base
@@ -113,17 +118,31 @@ def run_clearframe_pipeline(
         pub_date, plan["window_days_before"], plan["window_days_after"]
     )
     event_country = plan["source_country"]
+    article_type = plan["article_type"]
     print(f"      Plan     : {plan}")
     print(f"      Query    : {query}")
     print(f"      Date range: {start_dt} â†’ {end_dt}")
     print(f"      Event country (used to prefer local sources): {event_country}")
     print(f"      Original source country excluded: {plan['original_source_country']}")
     print(f"      Actor countries searched: {', '.join(plan['query_countries'])}")
+    print(f"      Article type: {article_type}")
 
     # â”€â”€ Stage 3: Search GDELT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    print(f"\n[3/9] Searching GDELT ({start_dt[:8]} to {end_dt[:8]}, max={max_gdelt_results})...")
-    gdelt_results = search_gdelt(query, startdatetime=start_dt, enddatetime=end_dt, maxrecords=max_gdelt_results)
-    gdelt_df      = pd.DataFrame(gdelt_results.get("articles", []))
+    loc         = quote_if_needed(plan["location"])
+    tparts      = " OR ".join(quote_if_needed(t) for t in plan["terms"])
+    terms_query = f"{loc} AND ({tparts})"
+
+    print(f"\n[3/9] Searching GDELT ({start_dt[:8]} to {end_dt[:8]}, "
+          f"one combined request, cap={gdelt_results_per_country} per country)...")
+    gdelt_articles = search_gdelt_balanced(
+        query,
+        plan["query_countries"],
+        startdatetime=start_dt,
+        enddatetime=end_dt,
+        maxrecords_per_country=gdelt_results_per_country,
+        overfetch_factor=gdelt_overfetch_factor,
+    )
+    gdelt_df = pd.DataFrame(gdelt_articles)
     print(f"      GDELT returned {len(gdelt_df)} articles.")
 
     # â”€â”€ Stage 3b: Regional fallback if too few results â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -134,13 +153,8 @@ def run_clearframe_pipeline(
         print(f"      Fallback domain: {fallback_domain} "
               f"(mapped from country: '{plan['source_country']}')")
 
-        # Build the terms-only portion of the query (strip sourcecountry clause)
-        loc         = quote_if_needed(plan["location"])
-        tparts      = " OR ".join(quote_if_needed(t) for t in plan["terms"])
-        terms_query = f"{loc} AND ({tparts})"
-
         fallback_results = search_gdelt_fallback(
-            terms_query, fallback_domain, start_dt, end_dt, maxrecords=max_gdelt_results
+            terms_query, fallback_domain, start_dt, end_dt, maxrecords=gdelt_results_per_country
         )
         fallback_df = pd.DataFrame(fallback_results.get("articles", []))
 
@@ -162,14 +176,11 @@ def run_clearframe_pipeline(
     print(f"      Passing all {len(candidates_df)} gathered GDELT article(s) to the topical gate.")
 
     # â”€â”€ Stage 4: Classify base article â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    print("\n[4/9] Classifying base article type...")
-    classification = classify_article(article_text, client)
-    print(f"      Primary type : {classification.get('primary_type')}")
-    print(f"      Secondary    : {classification.get('secondary_type')}")
-    print(f"      Justification: {classification.get('justification')}")
+    print("\n[4/9] Reusing query-plan article type for topical relevance...")
+    print(f"      Article type: {article_type}")
 
     common = {"article_text": article_text, "plan": plan, "query": query,
-              "gdelt_df": gdelt_df, "classification": classification}
+              "gdelt_df": gdelt_df, "article_type": article_type}
 
     def _print_gate(gate_results: list[dict]) -> int:
         n_pass = sum(1 for r in gate_results if r.get("topically_relevant"))
@@ -185,8 +196,7 @@ def run_clearframe_pipeline(
         print(f"\n[5/9] Fetching full text for all {len(candidates_df)} candidate(s) "
               f"(gate_mode='fulltext', local sources first)...")
         prelim_df = fetch_candidate_texts(
-            candidates_df, list(range(len(candidates_df))), event_country,
-            max_candidates=len(candidates_df)
+            candidates_df, list(range(len(candidates_df))), event_country
         )
         if prelim_df.empty:
             print("      No candidate yielded usable full text. Exiting early.")
@@ -197,7 +207,7 @@ def run_clearframe_pipeline(
                  for _, r in prelim_df.iterrows()}
         print(f"\n[6/9] Topical gate over {len(texts)} full-text candidate(s) "
               f"(binary same-event filter on the article body â€” no scoring)...")
-        gate_results = topical_gate(article_text, candidates_df, classification, client,
+        gate_results = topical_gate(article_text, candidates_df, article_type, client,
                                     texts=texts)
         n_pass = _print_gate(gate_results)
 
@@ -205,21 +215,18 @@ def run_clearframe_pipeline(
             print("      Nothing passed the topical gate. Exiting early.")
             return _early_exit(**common, gate_results=gate_results)
 
-        # Keep only the survivors that already have text, capped for Stage 7.
-        # prelim_df is already ordered local-first, so head() keeps locals.
+        # Keep every survivor that already has text.
         passed = {r["row_index"] for r in gate_results if r.get("topically_relevant")}
         fulltext_df = (
             prelim_df[prelim_df["row_index"].isin(passed)]
-            .head(max_fulltext)
             .reset_index(drop=True)
         )
-        print(f"      {len(fulltext_df)} candidate(s) carried into pair analysis "
-              f"(cap {max_fulltext}).")
+        print(f"      {len(fulltext_df)} candidate(s) carried into pair analysis.")
     else:
         # â”€â”€ Stage 5: Topical gate on title/metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"\n[5/9] Topical gate over {len(candidates_df)} candidates "
               f"(binary same-event filter â€” no scoring)...")
-        gate_results = topical_gate(article_text, candidates_df, classification, client)
+        gate_results = topical_gate(article_text, candidates_df, article_type, client)
         n_pass = _print_gate(gate_results)
 
         if n_pass == 0:
@@ -227,10 +234,10 @@ def run_clearframe_pipeline(
             return _early_exit(**common, gate_results=gate_results)
 
         # â”€â”€ Stage 6: Full-text fetch (survivors only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        print(f"\n[6/9] Fetching full text (up to {max_fulltext}, local sources first)...")
+        print("\n[6/9] Fetching full text for every topically relevant candidate "
+              "(local sources first)...")
         passed = [r["row_index"] for r in gate_results if r.get("topically_relevant")]
-        fulltext_df = fetch_candidate_texts(candidates_df, passed, event_country,
-                                            max_candidates=max_fulltext)
+        fulltext_df = fetch_candidate_texts(candidates_df, passed, event_country)
 
     if fulltext_df.empty:
         print("      No candidate yielded usable full text. Exiting early.")
@@ -238,91 +245,101 @@ def run_clearframe_pipeline(
 
     # â”€â”€ Stage 7: Chomsky pair analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     print(f"\n[7/9] Chomsky pair analysis over {len(fulltext_df)} full-text candidate(s)...")
-    print(f"      Each pair is analysed against the base article across "
-          f"{len(CHOMSKY_CATEGORIES)} categories.")
-    print("      'applies: false' is expected â€” most pairs evidence only 1-3 categories.")
+    print(f"      First extracting your article once across "
+          f"{len(SINGLE_ARTICLE_CATEGORIES)} single-article categories.")
+    source_analysis = extract_source_article_analysis(article_text, source_url, client)
+    print("      Source extraction complete. Reusing that fixed source analysis for "
+          f"{', '.join(SINGLE_ARTICLE_CATEGORIES)}.")
+    print("      Comparative categories are analyzed directly between your article and "
+          f"each GDELT article: {', '.join(COMPARATIVE_CATEGORIES)}.")
 
-    outlet_contexts: dict[str, dict] = {}
     pair_analyses:   list[dict]      = []
 
-    for n, (_, row) in enumerate(fulltext_df.iterrows(), start=1):
+    rows = [row for _, row in fulltext_df.iterrows()]
+    workers = min(PAIR_ANALYSIS_MAX_WORKERS, len(rows))
+    print(f"      Running {len(rows)} one-candidate pair-analysis LLM call(s), "
+          f"parallelism={workers}.")
+
+    def analyze_one(row) -> tuple[str, dict]:
         domain = str(row.get("domain", "unknown"))
-        print(f"\n      [{n}/{len(fulltext_df)}] {domain} (row {int(row['row_index'])})")
+        try:
+            analysis = chomsky_pair_analysis(article_text, source_analysis, row, client)
+        except Exception as e:
+            row_index = int(row.get("row_index", -1))
+            print(f"      [WARNING] Pair analysis failed for row {row_index}: {e}")
+            analysis = {
+                "row_index": row_index,
+                "article_reference": {
+                    "title": str(row.get("title", "")),
+                    "outlet": str(row.get("domain", "")),
+                    "source_country": str(row.get("sourcecountry", "")),
+                    "url": str(row.get("url", "")),
+                },
+                "category_answers": {
+                    name: {
+                        "source_article": source_analysis.get(name, {}) if name in SINGLE_ARTICLE_CATEGORIES else {},
+                        "comparison_article": {},
+                        "meaningful_difference": False,
+                        "difference": "",
+                        "source_basis": [],
+                        "comparison_basis": [],
+                    }
+                    for name in CHOMSKY_CATEGORIES
+                },
+            }
+        return domain, analysis
 
-        ctx = get_outlet_context(domain, client)
-        outlet_contexts[domain] = ctx
-        print(f"           [BACKEND ONLY] outlet context â€” state relationship: "
-              f"{ctx.get('state_relationship')} (confidence: {ctx.get('confidence')})")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(analyze_one, row) for row in rows]
+        for future in as_completed(futures):
+            domain, analysis = future.result()
+            pair_analyses.append(analysis)
 
-        analysis = chomsky_pair_analysis(article_text, row, ctx, client)
-        pair_analyses.append(analysis)
+            answers = analysis.get("category_answers", {})
+            populated = [
+                name for name, answer in answers.items()
+                if isinstance(answer, dict)
+                and (
+                    answer.get("meaningful_difference")
+                    or (isinstance(answer.get("comparison_article"), dict)
+                        and answer["comparison_article"].get("applies"))
+                )
+            ]
+            print(f"\n      [done] {domain} (row {int(analysis.get('row_index', -1))})")
+            if populated:
+                print(f"           Extracted observations: {', '.join(populated)}")
+            else:
+                print("           Extracted observations: none.")
 
-        applying = [n_ for n_, c in analysis.get("categories", {}).items() if c.get("applies")]
-        score, _ = score_illumination(analysis.get("categories", {}))
-        if applying:
-            print(f"           Applies: {', '.join(applying)}")
-        else:
-            print("           Applies: none â€” no evidenced finding for this pair.")
-        print(f"           Illumination score: {score}")
+    pair_analyses.sort(key=lambda pa: int(pa.get("row_index", 0)))
 
-    # â”€â”€ Stage 8: Selection by illumination score â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    print(f"\n[8/9] Selecting top {top_n} by illumination score "
-          f"(computed in Python, deterministic)...")
-    selected_df = select_by_illumination(fulltext_df, pair_analyses, event_country,
-                                         max_count=top_n)
+    # Stage 8/9: Category synthesis and display. No article ranking or scoring.
+    print(f"\n[8/9] Synthesising category paragraphs from {len(pair_analyses)} pair extraction(s)...")
+    synthesis = synthesize_category_paragraphs(pair_analyses, article_text, client)
+    print(f"      Produced {len(synthesis.get('categories', {}))} category paragraph(s) "
+          "and one concise overall summary.")
 
-    if selected_df.empty:
-        print("      No pair produced an evidenced finding. Nothing to surface.")
-        return _early_exit(**common, gate_results=gate_results,
-                           fulltext_df=fulltext_df, outlet_contexts=outlet_contexts,
-                           pair_analyses=pair_analyses)
-
-    for i, (_, row) in enumerate(selected_df.iterrows(), start=1):
-        print(f"        #{i}  {row['illumination_score']:<6} {row.get('domain', '?'):<28} "
-              f"strongest: {row.get('strongest_category', 'â€”')}")
-
-    # â”€â”€ Stage 9: Synthesis and display â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    print(f"\n[9/9] Synthesising across the {len(selected_df)} selected pair(s)...")
-    selected_rows      = set(int(r) for r in selected_df["row_index"])
-    selected_for_synth = [
-        {
-            "outlet":           str(row.get("domain", "")),
-            "source_country":   str(row.get("sourcecountry", "")),
-            "title":            str(row.get("title", "")),
-            "categories":       row.get("chomsky_findings", {}),
-            "why_this_article": row.get("why_this_article", ""),
-        }
-        for _, row in selected_df.iterrows()
-    ]
-    synthesis = synthesize_brief(selected_for_synth, article_text, client)
-    print("      Synthesis complete.")
-
-    print_user_results(selected_df, synthesis)
-    print_dev_results(fulltext_df, pair_analyses, outlet_contexts, selected_rows)
+    print("\n[9/9] Displaying category results and writing debug dump...")
+    print_user_results(synthesis)
+    print_dev_results(fulltext_df, pair_analyses)
 
     dump_path = dump_debug_run({
         "timestamp":       datetime.now(timezone.utc).isoformat(),
         "source_url":      source_url,
         "plan":            plan,
         "query":           query,
-        "classification":  classification,
+        "article_type":    article_type,
         "gate_results":    gate_results,
         "fetched_text_metadata": [
             {"row_index": int(r["row_index"]), "domain": str(r.get("domain", "")),
              "url": str(r.get("url", "")), "sourcecountry": str(r.get("sourcecountry", "")),
+             "query_country": str(r.get("query_country", "")),
              "is_local": bool(r.get("is_local", False)),
              "text_length": len(str(r.get("article_text", "")))}
             for _, r in fulltext_df.iterrows()
         ],
-        "outlet_contexts": outlet_contexts,
+        "source_analysis": source_analysis,
         "pair_analyses":   pair_analyses,
-        "scores": [
-            {"row_index": int(pa["row_index"]),
-             "illumination_score": score_illumination(pa.get("categories", {}))[0],
-             "breakdown":          score_illumination(pa.get("categories", {}))[1]}
-            for pa in pair_analyses
-        ],
-        "selected":  _df_records(selected_df, drop=("article_text",)),
         "synthesis": synthesis,
     })
     if dump_path:
@@ -334,12 +351,12 @@ def run_clearframe_pipeline(
         "plan":            plan,
         "query":           query,
         "gdelt_df":        gdelt_df,
-        "classification":  classification,
+        "article_type":    article_type,
         "gate_results":    gate_results,
         "fulltext_df":     fulltext_df,
-        "outlet_contexts": outlet_contexts,
+        "source_analysis": source_analysis,
         "pair_analyses":   pair_analyses,
-        "selected_df":     selected_df,
+        "selected_df":     pd.DataFrame(),
         "synthesis":       synthesis,
     }
 
@@ -363,4 +380,5 @@ if __name__ == "__main__":
     # SOURCE_URL = "https://apnews.com/article/iran-war-khamenei-politics-religion-society-a9e0405878db8266e1965d7c0b396243"
     SOURCE_URL = "https://apnews.com/article/ukraine-russia-war-kyiv-strikes-july-2026-83bcba8bb972ce248a805bc576a7322c"
     output = run_clearframe_pipeline(source_url=SOURCE_URL)
+
 

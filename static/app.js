@@ -1,10 +1,10 @@
-// ClearFrame front end — POSTs to the backend's /run endpoint and renders the
-// two views: a live terminal Console (debugging) and structured result cards
-// (validation). Each visitor supplies their own OpenAI key; it rides in the
+﻿// ClearFrame front end â€” POSTs to the backend's /run endpoint and renders the
+// three views: live Console output, user-facing Results, and structured LLM
+// analysis. Each visitor supplies their own OpenAI key; it rides in the
 // POST body (not the URL) so it never lands in server logs or history.
 
 const $ = s => document.querySelector(s);
-const consoleEl = $("#console"), resultsEl = $("#results");
+const consoleEl = $("#console"), resultsEl = $("#results"), analysisEl = $("#analysis");
 const dot = $("#dot"), statusText = $("#statusText"), goBtn = $("#go");
 const keyEl = $("#apiKey"), rememberEl = $("#remember");
 let running = false, rawLog = "";
@@ -17,14 +17,19 @@ if (savedKey){ keyEl.value = savedKey; rememberEl.checked = true; }
 // Tabs
 function showTab(which){
   const con = which === "console";
+  const res = which === "results";
+  const ana = which === "analysis";
   $("#tabConsole").classList.toggle("active", con);
-  $("#tabResults").classList.toggle("active", !con);
+  $("#tabResults").classList.toggle("active", res);
+  $("#tabAnalysis").classList.toggle("active", ana);
   consoleEl.style.display = con ? "" : "none";
   $("#consoleTools").style.display = con ? "" : "none";
-  resultsEl.style.display = con ? "none" : "";
+  resultsEl.style.display = res ? "" : "none";
+  analysisEl.style.display = ana ? "" : "none";
 }
 $("#tabConsole").onclick = () => showTab("console");
 $("#tabResults").onclick = () => showTab("results");
+$("#tabAnalysis").onclick = () => showTab("analysis");
 
 function setStatus(cls, text){ dot.className = "dot " + cls; statusText.textContent = text; }
 $("#clearLog").onclick = () => { consoleEl.innerHTML = ""; rawLog = ""; };
@@ -35,11 +40,11 @@ function classify(line){
   if (/^\s*\[\d\/9\]/.test(line)) return "stage";
   if (/\[WARNING\]/.test(line)) return "warn";
   if (/ERROR|Traceback|Exception|Error:/.test(line)) return "err";
-  if (/\[DEV\]|BACKEND ONLY/.test(line)) return "dev";
+  if (/\[DEV\]/.test(line)) return "dev";
   if (/\[DEBUG\]/.test(line)) return "debug";
   if (/\[PASS\]/.test(line)) return "pass";
   if (/\[drop\]/.test(line)) return "drop";
-  if (/^[\s─=]+$/.test(line)) return "rule";
+  if (/^[\sâ”€=]+$/.test(line)) return "rule";
   return "";
 }
 
@@ -55,32 +60,99 @@ function appendLine(text){
 }
 
 function renderResults(data){
-  const arts = data.articles || [];
-  $("#resCount").textContent = arts.length ? "(" + arts.length + ")" : "";
+  const cats = data.categories || [];
+  $("#resCount").textContent = cats.length ? "(" + cats.length + ")" : "";
   let html = "";
-  if (data.overall_synthesis){
-    html += '<div class="synth"><h3>What these articles together let you see</h3>' +
-            escapeHtml(data.overall_synthesis) + '</div>';
+  if (data.summary){
+    html += '<div class="synth"><h3>Summary</h3>' + escapeHtml(data.summary);
+    const summaryRefs = data.summary_supporting_articles || [];
+    if (summaryRefs.length){
+      html += '<div class="meta" style="margin-top:10px">References</div>';
+      summaryRefs.forEach(a => {
+        const title = a.title || "Untitled";
+        const country = a.source_country || a.outlet || "";
+        const url = a.url || "";
+        html += '<div style="margin-top:6px">' +
+          (url ? '<a href="' + encodeURI(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
+          (country ? ' <span class="meta">(' + escapeHtml(country) + ')</span>' : '') +
+          '</div>';
+      });
+    }
+    html += '</div>';
   }
   if (data.structural_note){
     html += '<div class="note">' + escapeHtml(data.structural_note) + '</div>';
   }
-  if (!arts.length){
-    html += '<div class="empty">No comparison articles surfaced for this story.</div>';
+  if (!cats.length){
+    html += '<div class="empty">No meaningful category-level differences surfaced for this story.</div>';
   } else {
-    arts.forEach((a, i) => {
+    html += '<details class="category-details"><summary>Category Details</summary><div class="details-body">';
+    cats.forEach(c => {
+      const refs = c.supporting_articles || [];
       html += '<div class="card"><div class="top">' +
-        '<div><div class="title">#' + (i+1) + '  ' + escapeHtml(a.title || "Untitled") + '</div>' +
-        '<div class="meta">' + escapeHtml(a.domain) + ' · ' + escapeHtml(a.sourcecountry) + '</div></div>' +
-        (a.score != null ? '<div class="score">score ' + a.score + '</div>' : '') +
+        '<div><div class="title">' + escapeHtml(c.label || c.key || "Category") + '</div></div>' +
         '</div>' +
-        (a.lens ? '<span class="lens">' + escapeHtml(a.lens) + '</span>' : '') +
-        '<div class="why">' + escapeHtml(a.why) + '</div>' +
-        (a.url ? '<div style="margin-top:8px"><a href="' + encodeURI(a.url) + '" target="_blank" rel="noopener">' + escapeHtml(a.url) + '</a></div>' : '') +
-        '</div>';
+        '<div class="why">' + escapeHtml(c.paragraph) + '</div>';
+      if (refs.length){
+        html += '<div class="meta" style="margin-top:10px">References</div>';
+        refs.forEach(a => {
+          const title = a.title || "Untitled";
+          const outlet = a.outlet || "";
+          const url = a.url || "";
+          html += '<div style="margin-top:6px">' +
+            (url ? '<a href="' + encodeURI(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
+            (outlet ? ' <span class="meta">(' + escapeHtml(outlet) + ')</span>' : '') +
+            '</div>';
+        });
+      }
+      html += '</div>';
     });
+    html += '</div></details>';
   }
   resultsEl.innerHTML = html;
+}
+
+function renderAnalysis(data){
+  const analysis = data.llm_analysis || {};
+  const pairs = analysis.pair_extractions || [];
+  $("#analysisCount").textContent = pairs.length ? "(" + pairs.length + ")" : "";
+
+  let html = "";
+  html += analysisSection("Source Article Extraction", renderJsonBlock(analysis.source_extraction || {}));
+  html += analysisSection("Pair Extractions", renderPairs(pairs));
+  html += analysisSection("Final Synthesis", renderJsonBlock(analysis.category_synthesis || {}));
+  analysisEl.innerHTML = html;
+}
+
+function analysisSection(title, body){
+  return '<section class="analysis-section"><h3>' + escapeHtml(title) + '</h3>' + body + '</section>';
+}
+
+function renderPairs(pairs){
+  if (!pairs.length) return '<div class="empty compact">No pair extraction output.</div>';
+  return pairs.map(pair => {
+    const ref = pair.article_reference || {};
+    const title = ref.title || "Untitled";
+    const country = ref.source_country || "";
+    const outlet = ref.outlet || "";
+    const answers = pair.category_answers || {};
+    let body = '<div class="meta">' + escapeHtml([country, outlet].filter(Boolean).join(" · ")) + '</div>';
+    Object.keys(answers).forEach(key => {
+      body += '<details class="analysis-detail"><summary>' + escapeHtml(labelCategory(key)) + '</summary>' +
+        renderJsonBlock(answers[key]) + '</details>';
+    });
+    return '<details class="analysis-card"><summary>' +
+      '<span>' + escapeHtml(title) + '</span><span class="meta">row ' + escapeHtml(pair.row_index) + '</span>' +
+      '</summary><div class="analysis-body">' + body + '</div></details>';
+  }).join("");
+}
+
+function renderJsonBlock(value){
+  return '<pre class="json-block">' + escapeHtml(JSON.stringify(value || {}, null, 2)) + '</pre>';
+}
+
+function labelCategory(key){
+  return String(key || "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function escapeHtml(s){
@@ -91,14 +163,14 @@ function escapeHtml(s){
 // Dispatch a single decoded SSE event to the right renderer.
 function handleMsg(msg){
   if (msg.type === "line") appendLine(msg.text);
-  else if (msg.type === "result"){ renderResults(msg.data); setStatus("ok", "Done. See the Results tab for the validated output."); }
+  else if (msg.type === "result"){ renderResults(msg.data); renderAnalysis(msg.data); setStatus("ok", "Done. See Results and LLM Analysis."); }
   else if (msg.type === "error"){ appendLine("ERROR: " + msg.text); setStatus("err", "Failed: " + msg.text); }
   else if (msg.type === "done"){
     if (dot.className.indexOf("err") === -1 && dot.className.indexOf("ok") === -1) setStatus("ok", "Finished.");
   }
 }
 
-// Read the streaming SSE response body, parsing "data: …\n\n" frames as they
+// Read the streaming SSE response body, parsing "data: â€¦\n\n" frames as they
 // arrive. We use fetch (not EventSource) so the key can go in the POST body.
 async function streamRun(url, apiKey){
   const resp = await fetch("/run", {
@@ -140,11 +212,12 @@ $("#form").addEventListener("submit", async e => {
   if (rememberEl.checked) localStorage.setItem(KEY_STORE, apiKey);
   else localStorage.removeItem(KEY_STORE);
 
-  consoleEl.innerHTML = ""; resultsEl.innerHTML = ""; rawLog = "";
+  consoleEl.innerHTML = ""; resultsEl.innerHTML = ""; analysisEl.innerHTML = ""; rawLog = "";
   $("#resCount").textContent = "";
+  $("#analysisCount").textContent = "";
   showTab("console");
   running = true; goBtn.disabled = true;
-  setStatus("run", "Running… (this takes ~30–90s; watch it stream below)");
+  setStatus("run", "Runningâ€¦ (this takes ~30â€“90s; watch it stream below)");
 
   try {
     await streamRun(url, apiKey);
@@ -154,3 +227,4 @@ $("#form").addEventListener("submit", async e => {
     running = false; goBtn.disabled = false;
   }
 });
+
