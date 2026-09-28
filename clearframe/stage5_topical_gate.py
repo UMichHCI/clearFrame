@@ -6,50 +6,39 @@ from openai import OpenAI
 
 from .config import MODEL_MINI
 from .llm import api_chat, extract_json
-from .prompts import TOPICAL_GATE_FULLTEXT_SYSTEM, TOPICAL_GATE_SYSTEM
+from .prompts import TOPICAL_GATE_FULLTEXT_SYSTEM
 
-# Per-candidate body budget when gating on full text â€” enough of the lead to
-# judge same-event without bloating the prompt across ~20 candidates.
-GATE_FULLTEXT_CHARS = 1500
+# Stage 1 caps extracted article bodies at 8,000 characters, so this passes the
+# complete extracted body to the full-text topical gate.
+GATE_FULLTEXT_CHARS = 8000
 GATE_MAX_WORKERS = 8
 
 
-def topical_gate(base_text: str, candidates_df: pd.DataFrame,
-                 article_type: str, client: OpenAI,
-                 texts: dict[int, str] | None = None) -> list[dict]:
+def topical_gate(base_text: str, fulltext_df: pd.DataFrame,
+                 article_type: str, client: OpenAI) -> list[dict]:
     """
     Binary same-event filter. No scoring of any kind.
     Returns one dict per candidate: {row_index, topically_relevant, reason}.
 
-    If `texts` is given (row_index -> article body), the gate reads the article
-    body ("fulltext" mode) and only judges candidates present in that mapping;
-    every other candidate is marked not-relevant with a note. Otherwise the gate
-    reads title/metadata only ("metadata" mode).
+    Every candidate must already contain extracted article text. Candidates
+    without text are removed before this function is called.
     """
-    if candidates_df.empty:
+    if fulltext_df.empty:
         return []
 
-    use_fulltext = texts is not None
-    template     = TOPICAL_GATE_FULLTEXT_SYSTEM if use_fulltext else TOPICAL_GATE_SYSTEM
-    system       = template.format(
-        article_type=article_type,
-    )
+    system = TOPICAL_GATE_FULLTEXT_SYSTEM.format(article_type=article_type)
 
     candidates_payload = []
-    for i, (_, row) in enumerate(candidates_df.iterrows()):
-        # In fulltext mode, judge only candidates we actually retrieved text for.
-        if use_fulltext and i not in texts:
-            continue
+    for _, row in fulltext_df.iterrows():
         entry = {
-            "row_index":     i,
+            "row_index":     int(row.get("row_index", 0)),
             "title":         str(row.get("title", "")),
             "domain":        str(row.get("domain", "")),
             "sourcecountry": str(row.get("sourcecountry", "")),
             "seendate":      str(row.get("seendate", "")),
             "language":      str(row.get("language", "")),
+            "article_text":  str(row.get("article_text", ""))[:GATE_FULLTEXT_CHARS],
         }
-        if use_fulltext:
-            entry["article_text"] = str(texts[i])[:GATE_FULLTEXT_CHARS]
         candidates_payload.append(entry)
 
     def judge_one(entry: dict) -> dict:
@@ -64,7 +53,7 @@ def topical_gate(base_text: str, candidates_df: pd.DataFrame,
                 system=system,
                 user=user_prompt,
                 # One candidate per call, so the response should be short.
-                max_tokens=800 if use_fulltext else 500,
+                max_tokens=800,
                 model=MODEL_MINI,
                 response_format={"type": "json_object"},
             )
@@ -84,7 +73,6 @@ def topical_gate(base_text: str, candidates_df: pd.DataFrame,
                 "reason":             "Topical gate failed for this candidate.",
             }
 
-    # Nothing to judge (e.g. every fetch failed) â€” everyone is dropped below.
     results: list[dict] = []
     if candidates_payload:
         workers = min(GATE_MAX_WORKERS, len(candidates_payload))
@@ -95,20 +83,15 @@ def topical_gate(base_text: str, candidates_df: pd.DataFrame,
             for future in as_completed(futures):
                 results.append(future.result())
 
-    # A candidate the model returned no verdict for is excluded rather than
-    # silently admitted â€” a missing verdict is not a passing verdict. In fulltext
-    # mode, candidates without retrieved text are dropped here for the same reason.
+    # A missing verdict is excluded rather than silently admitted.
     seen = {r.get("row_index") for r in results}
-    for i in range(len(candidates_df)):
-        if i not in seen:
-            if use_fulltext and i not in texts:
-                reason = "No full text retrieved, so the gate could not judge it."
-            else:
-                reason = "No verdict returned by the topical gate."
+    for entry in candidates_payload:
+        row_index = int(entry["row_index"])
+        if row_index not in seen:
             results.append({
-                "row_index":          i,
+                "row_index":          row_index,
                 "topically_relevant": False,
-                "reason":             reason,
+                "reason":             "No verdict returned by the topical gate.",
             })
 
     return sorted(results, key=lambda r: r.get("row_index", 0))

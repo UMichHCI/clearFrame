@@ -18,15 +18,15 @@ There are two ways to run it:
 
 The pipeline runs in nine stages:
 
-1. **Fetch** the base article text + publication date (`trafilatura`).
-2. **Query plan** â€” an LLM builds a structured GDELT search (location, country, terms, time window).
-3. **Search GDELT** for candidate articles covering the same event (with a regional fallback).
-4. **Classify** the base article's type (breaking news, ongoing situation, policy, historical, human-interest).
-5. **Topical gate** â€” a binary "same event?" filter. By default it runs on titles/metadata (cheap); set `CLEARFRAME_GATE_MODE=fulltext` to instead fetch every candidate's full text first and gate on the article body (more accurate, more fetches).
-6. **Full-text fetch** for the candidates that passed, local sources first (in `fulltext` mode this already happened in step 5 and is reused).
-7. **Pair analysis** â€” each candidate is compared against the base article across six propaganda-model categories, with verbatim-quote evidence required.
-8. **Selection** â€” a deterministic illumination score (computed in Python) ranks the pairs; top 5 are kept.
-9. **Synthesis + display** â€” a short reader-facing summary, plus a verbose developer view.
+1. **Fetch** the base article text, headline, and publication date (`trafilatura`).
+2. **Query plan** â€” an LLM identifies the article type and builds a structured GDELT search (location, countries, terms, time window).
+3. **Search GDELT** for an overfetched candidate pool, with a regional fallback when needed.
+4. **Full-text fetch** for every metadata-unique candidate, local sources first.
+5. **NLP deduplication** clusters near-duplicate full texts within each country and keeps the most complete copy.
+6. **Full-text topical gate** makes one binary "same event?" judgment per remaining article.
+7. **Diversity selection** keeps up to 10 articles per country, no more than two per outlet, preferring different outlets first.
+8. **Pair analysis** compares every selected article with the source across six propaganda-model categories.
+9. **Synthesis + display** combines evidence-backed differences, displays them, and saves a debug record.
 
 ---
 
@@ -68,7 +68,10 @@ click **Run pipeline**.
 - **Console tab** â€” the full 9-stage terminal log streams in live as it runs
   (~30â€“90s). Good for debugging.
 - **Results tab** â€” the selected comparison articles and the synthesis, rendered
-  as clean cards. Good for validation and for non-technical readers.
+  as clean cards. Good for validation and for non-technical readers. After each
+  successful run, the same content is written to `results.json`, replacing the
+  previous run's file. Use **Copy for Google Docs** to copy the complete result
+  with headings, paragraphs, and linked references preserved.
 
 Press **Ctrl+C** in the terminal to stop the server.
 
@@ -103,11 +106,10 @@ clearFrame/
 |   |-- stage1_fetch.py     # base article fetch
 |   |-- stage2_query_plan.py
 |   |-- stage3_gdelt_search.py
-|   |-- stage4_classify.py
+|   |-- diversity.py        # metadata/text deduplication and outlet balancing
 |   |-- stage5_topical_gate.py
 |   |-- stage6_fulltext.py
 |   |-- stage7_chomsky.py
-|   |-- stage8_selection.py
 |   |-- stage9_synthesis.py
 |   |-- display.py
 |   `-- debug.py

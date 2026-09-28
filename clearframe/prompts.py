@@ -49,85 +49,14 @@ Example output:
 Rules:
 - location, source_country, and original_source_country must never be empty strings
 - actor_countries must include source_country unless source_country is only a proxy for a broader region
-- actor_countries should be direct country actors, not news outlet locations
+- actor_countries should contain sovereign countries that can be used with GDELT's
+  sourcecountry filter, not organizations, unions, blocs, or news outlet locations
+- never return "European Union" as a country; return the directly involved member
+  countries instead, or omit it when no specific member country is directly involved
 - do not include the base article's publishing country merely because the outlet is based there
 - terms should be broad for high recall and should not be country names already listed in actor_countries
 - article_type must be one of the six listed values
 - the date window must match article_type exactly
-"""
-
-CLASSIFICATION_SYSTEM = """
-You are classifying a news article to understand what kind of story it is.
-Use your own judgment. Return ONLY valid JSON. No preamble, no markdown fences.
-
-Your goal is to identify the primary nature of the article so that relevance
-scoring later can be interpreted appropriately. This is not a rigid test -
-use the categories below as a thinking guide, not a checklist.
-
-Categories to consider (pick the one that best describes the article's core focus):
-  - breaking_news     : Something specific just happened and coverage is time-sensitive
-  - ongoing_situation : A situation that has been developing over time with no single trigger
-  - economics_policy  : Primarily about economic conditions, policy, legislation, or trade
-  - historical        : Primarily about past events or background context
-  - human_interest    : Primarily about how people or communities are experiencing something
-  - mixed             : Genuinely spans more than one category
-
-Some questions that might help you decide (use them as a guide, not a formula):
-  - Is there a specific triggering event, or is this about a broader situation?
-  - Is time a critical factor in the article's relevance, or would it still matter months from now?
-  - Is the focus on data, policy, and institutions - or on people and lived experience?
-  - Does the article describe something that happened recently, or does it explain background?
-
-Output schema:
-{
-  "primary_type":   "breaking_news | ongoing_situation | economics_policy | historical | human_interest | mixed",
-  "secondary_type": "<type or null if no meaningful secondary>",
-  "justification":  "<1-2 sentences explaining your reasoning in plain language>"
-}
-"""
-
-TOPICAL_GATE_SYSTEM = """
-You are filtering candidate news articles against a base article. This is a filter,
-not a ranking. Make one binary judgment per candidate and nothing more.
-
-The base article type is: {article_type}.
-
-For each candidate, using only its title, domain, source country, date, and language,
-decide: is this article about the same underlying event, situation, or subject as the
-base article - interpreted appropriately for the base article's type?
-
-Interpret "same" according to the article type:
-  breaking_news     -> the same specific incident
-  ongoing_situation -> the same ongoing situation, even at a different moment in it
-  economics_policy  -> the same policy, market, or economic condition
-  historical        -> the same historical events or the same background subject
-  human_interest    -> the same community, population, or lived experience
-  mixed             -> use judgment across the above
-
-Be inclusive rather than strict: an article covering the same event from an unexpected
-angle, or covering a direct consequence of the event, is topically relevant. An article
-that merely shares a country or a broad theme is not.
-
-Do NOT score, rank, or evaluate framing, tone, or quality. You cannot see the article
-text - only its title and metadata. Any judgment beyond "same subject or not" would be
-unfounded here.
-
-Coverage patterns in a news system are structural - they follow from an outlet's position,
-its audience, and its sourcing, not from the intent of journalists. Your one-sentence reason
-must never suggest that an outlet or a journalist intended anything.
-
-Return ONLY valid JSON, no markdown fences, as an object with a single key "results"
-whose value is an array with one object per candidate:
-
-{{
-  "results": [
-    {{
-      "row_index":          <integer matching the candidate's row_index>,
-      "topically_relevant": true | false,
-      "reason":             "<one sentence>"
-    }}
-  ]
-}}
 """
 
 TOPICAL_GATE_FULLTEXT_SYSTEM = """
@@ -182,6 +111,15 @@ CHOMSKY_CATEGORIES = [
     "suppressed_alternative",
     "smoke_and_discrepancies",
 ]
+
+CATEGORY_PLAIN_LABELS = {
+    "worthy_unworthy_victims":  "Worthy vs. Unworthy Victims",
+    "agency_attribution":       "Agency Attribution",
+    "presuppositions_doctrine": "Presuppositions and Doctrine",
+    "selective_criteria":       "Selective Criteria",
+    "suppressed_alternative":   "Suppressed Alternative",
+    "smoke_and_discrepancies":  "Smoke and Discrepancies",
+}
 
 SINGLE_ARTICLE_CATEGORIES = [
     "agency_attribution",
@@ -495,32 +433,26 @@ OUTPUT SHAPE FOR DIFFERENCES
 {difference_schema}
 """
 
-# Backward-compatible aliases for older imports. New code should use the
-# ARTICLE_* and PAIR_DIFFERENCE_* prompt constants above.
-CHOMSKY_EXTRACTION_SYSTEM = PAIR_DIFFERENCE_SYSTEM
-CHOMSKY_EXTRACTION_USER_TEMPLATE = PAIR_DIFFERENCE_USER_TEMPLATE
-
 CATEGORY_SYNTHESIS_SYSTEM = """
-You are the final category-synthesis model for ClearFrame.
+You synthesize one ClearFrame category independently from every other category.
 
-You receive structured article-pair analyses. For every category, the extraction model
-produced flexible analysis for your article and for one comparison article, then a
-difference model marked whether the comparison reveals a meaningful difference. Your job
-is to decide which of those pair-level differences are strong enough to surface.
+You receive one category name and only the article-pair analyses for that category.
+Decide whether its evidence is strong enough to surface, then return an explicit
+include-or-exclude decision. Do not consider whether another category might express a
+similar conclusion; categories never compete with one another in this call.
 
 The analytic categories are diagnostic tools. The final finding is the underlying
 doctrine they reveal: a premise the user's article treats as settled, the boundary of
 legitimate debate that follows from it, and (when supported) the interest structurally
 served by that boundary. Do not make the category pattern itself the main conclusion.
 
-For each category:
-- Include the category only if one or more comparison articles show a meaningful,
+- Set "include" to true only if one or more comparison articles show a meaningful,
   text-supported difference that warrants a doctrinal inference, grounded in the paired
   source_article and comparison_article answers and the doctrine fields.
-- Omit the category entirely if the differences are weak, generic, duplicative, or not
-  actually about a contrast with your article. Also omit it when you can describe only a
-  surface difference and cannot defend an underlying premise.
-- Write exactly one concise paragraph for each included category.
+- Set "include" to false if the differences are weak, generic, unsupported, or not
+  actually about a contrast with your article. Also exclude it when you can describe only
+  a surface difference and cannot defend an underlying premise.
+- When included, write exactly one concise paragraph.
 - Begin with the doctrinal claim about your article, not with a recap of what each article
   focuses on. Next explain the boundary it creates. Use the visible contrast only as
   evidence for those claims.
@@ -562,27 +494,27 @@ For each category:
   "makes visible" to claims about what an entire nation, outlet, or journalist believes.
 - Do not stop at formulations such as "your article focuses on X while coverage from Y
   emphasizes Z." Such statements may supply evidence, but they are not a finding.
-- Do not rank articles. Do not score anything. Do not produce an overall synthesis.
+- Do not rank articles. Do not score anything. Do not produce an overall synthesis or
+  discuss any category other than the supplied category.
 
 Before returning, check each paragraph: could a reader understand it without knowing media
 theory, and can the reader point to the exact article details that justify its main claim?
 If either answer is no, rewrite it in plainer and more concrete terms.
 
-Return ONLY valid JSON, no markdown fences:
+When include is false, leave the claim, paragraph, examples, and supporting_articles empty
+and give a short exclusion_reason. Return ONLY valid JSON, no markdown fences:
 {
-  "categories": {
-    "worthy_unworthy_victims": {
-      "doctrinal_claim": "<one sentence naming the tacit premise in your article>",
-      "paragraph": "<one doctrine-first paragraph explaining the premise, its boundary, and the comparative evidence>",
-      "examples": [
-        "<specific example from your article and why it supports the claim>",
-        "<specific example from a comparison article and why it exposes the taken-for-granted idea>"
-      ],
-      "supporting_articles": [
-        {"title": "<title>", "outlet": "<domain>", "source_country": "<country>", "url": "<url>"}
-      ]
-    }
-  }
+  "include": true,
+  "doctrinal_claim": "<one sentence naming the tacit premise in your article>",
+  "paragraph": "<one doctrine-first paragraph explaining the premise, its boundary, and the comparative evidence>",
+  "examples": [
+    "<specific example from your article and why it supports the claim>",
+    "<specific example from a comparison article and why it exposes the taken-for-granted idea>"
+  ],
+  "supporting_articles": [
+    {"title": "<title>", "outlet": "<domain>", "source_country": "<country>", "url": "<url>"}
+  ],
+  "exclusion_reason": ""
 }
 """
 

@@ -7,6 +7,10 @@ from .config import COUNTRY_FALLBACK, FALLBACK_DEFAULT, GDELT_URL
 _gdelt_request_count = 0
 
 
+class GDELTSearchError(RuntimeError):
+    """Raised when GDELT does not return a valid successful response."""
+
+
 def normalize_country(text: str) -> str:
     return str(text).strip().lower().replace(" ", "")
 
@@ -60,10 +64,12 @@ def search_gdelt(query: str, startdatetime: str, enddatetime: str, maxrecords: i
     # avoids the long tail of exponential backoff.
     RETRY_WAIT = 5
     response = None
+    last_request_error = None
     for attempt in range(5):
         try:
             response = requests.get(GDELT_URL, params=params, timeout=30)
         except requests.exceptions.RequestException as e:
+            last_request_error = e
             print(f"  [DEBUG] GDELT request failed ({e.__class__.__name__}) on attempt {attempt + 1}.")
             if attempt < 4:
                 print(f"  [DEBUG] Waiting {RETRY_WAIT}s before retry...")
@@ -71,21 +77,39 @@ def search_gdelt(query: str, startdatetime: str, enddatetime: str, maxrecords: i
             continue
 
         print(f"  [DEBUG] GDELT HTTP status: {response.status_code} (attempt {attempt + 1})")
-        if response.status_code != 429:
-            break
-        print(f"  [DEBUG] Rate limited â€” waiting {RETRY_WAIT}s before retry...")
-        time.sleep(RETRY_WAIT)
+        if response.status_code == 429:
+            if attempt < 4:
+                print(f"  [DEBUG] Rate limited â€” waiting {RETRY_WAIT}s before retry...")
+                time.sleep(RETRY_WAIT)
+            continue
+        if response.status_code != 200:
+            raise GDELTSearchError(
+                f"GDELT returned HTTP {response.status_code}."
+            )
+        break
 
     if response is None:
-        print("  [WARNING] GDELT request failed on every attempt â€” returning no results.")
-        return {}
+        detail = f" ({last_request_error})" if last_request_error else ""
+        raise GDELTSearchError(
+            f"GDELT request failed on every attempt{detail}."
+        )
+
+    if response.status_code == 429:
+        raise GDELTSearchError(
+            "GDELT rate limiting persisted after 5 attempts."
+        )
 
     try:
-        return response.json()
-    except Exception:
-        print("[WARNING] GDELT did not return valid JSON:")
-        print(response.text[:500])
-        return {}
+        payload = response.json()
+    except Exception as exc:
+        detail = response.text[:500].strip()
+        raise GDELTSearchError(
+            f"GDELT did not return valid JSON: {detail}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise GDELTSearchError("GDELT returned an unexpected JSON response.")
+    return payload
 
 
 def search_gdelt_balanced(
@@ -97,10 +121,11 @@ def search_gdelt_balanced(
     overfetch_factor: int = 3,
 ) -> list[dict]:
     """
-    Runs one combined GDELT DOC API request, then caps locally per source country.
+    Runs one combined GDELT request and retains an overfetched country pool.
 
-    The overfetch gives lower-volume countries a better chance to appear in the
-    combined result set while avoiding one GDELT API call per country.
+    Diversity and the final per-country cap are applied later, after full-text
+    retrieval and topical filtering. Keeping the overflow here provides enough
+    alternatives to replace duplicates and repeated outlets.
     Returns a flat, URL-deduplicated article list with a `query_country` field
     matching the article's sourcecountry when it is one of the query countries.
     """
@@ -124,6 +149,7 @@ def search_gdelt_balanced(
         maxrecords=maxrecords,
     )
 
+    pool_limit_per_country = maxrecords_per_country * max(1, overfetch_factor)
     articles: list[dict] = []
     seen_urls: set[str] = set()
     counts: dict[str, int] = {country: 0 for country in country_lookup}
@@ -135,7 +161,7 @@ def search_gdelt_balanced(
         normalized_country = normalize_country(raw_article.get("sourcecountry", ""))
         if normalized_country not in country_lookup:
             continue
-        if counts[normalized_country] >= maxrecords_per_country:
+        if counts[normalized_country] >= pool_limit_per_country:
             continue
 
         url = str(raw_article.get("url", "")).strip()
@@ -150,7 +176,7 @@ def search_gdelt_balanced(
         counts[normalized_country] += 1
 
     for normalized, original in country_lookup.items():
-        print(f"        {original}: {counts[normalized]} retained article(s)")
+        print(f"        {original}: {counts[normalized]} candidate(s) retained for diversity selection")
 
     return articles
 

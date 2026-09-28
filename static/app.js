@@ -7,7 +7,8 @@ const $ = s => document.querySelector(s);
 const consoleEl = $("#console"), resultsEl = $("#results"), analysisEl = $("#analysis");
 const dot = $("#dot"), statusText = $("#statusText"), goBtn = $("#go");
 const keyEl = $("#apiKey"), rememberEl = $("#remember");
-let running = false, rawLog = "";
+const copyResultsBtn = $("#copyResults");
+let running = false, rawLog = "", latestResults = null;
 
 // Restore a remembered key from this browser (opt-in only).
 const KEY_STORE = "clearframe.openai_key";
@@ -24,6 +25,7 @@ function showTab(which){
   $("#tabAnalysis").classList.toggle("active", ana);
   consoleEl.style.display = con ? "" : "none";
   $("#consoleTools").style.display = con ? "" : "none";
+  $("#resultsTools").style.display = res ? "" : "none";
   resultsEl.style.display = res ? "" : "none";
   analysisEl.style.display = ana ? "" : "none";
 }
@@ -34,6 +36,135 @@ $("#tabAnalysis").onclick = () => showTab("analysis");
 function setStatus(cls, text){ dot.className = "dot " + cls; statusText.textContent = text; }
 $("#clearLog").onclick = () => { consoleEl.innerHTML = ""; rawLog = ""; };
 $("#copyLog").onclick = () => navigator.clipboard.writeText(rawLog);
+
+function referenceText(article){
+  const title = article.title || "Untitled";
+  const source = article.source_country || article.outlet || "";
+  const url = article.url || "";
+  return "- " + title + (source ? " (" + source + ")" : "") + (url ? ": " + url : "");
+}
+
+function groupArticlesByCountry(articles){
+  const groups = new Map();
+  articles.forEach(article => {
+    const country = article.source_country || "Unknown country";
+    if (!groups.has(country)) groups.set(country, []);
+    groups.get(country).push(article);
+  });
+  return groups;
+}
+
+function addGroupedArticlesHtml(parts, articles){
+  groupArticlesByCountry(articles).forEach((countryArticles, country) => {
+    parts.push("<h3>" + escapeHtml(country) + "</h3><ul>");
+    countryArticles.forEach(article => {
+      const title = escapeHtml(article.title || "Untitled");
+      const outlet = escapeHtml(article.outlet || "");
+      const role = article.role === "source" ? "Source" : "Comparison";
+      const url = safeHttpUrl(article.url || "");
+      const linkedTitle = url
+        ? '<a href="' + escapeAttribute(url) + '">' + title + "</a>"
+        : title;
+      parts.push("<li>[" + escapeHtml(role) + "] " + linkedTitle +
+        (outlet ? " (" + outlet + ")" : "") + "</li>");
+    });
+    parts.push("</ul>");
+  });
+}
+
+function resultsAsPlainText(data){
+  const lines = ["ClearFrame Results"];
+  if (data.stop_reason) lines.push("", "Analysis stopped", data.stop_reason);
+  if (data.summary){
+    lines.push("", "Summary", data.summary);
+    const refs = data.summary_supporting_articles || [];
+    if (refs.length) lines.push("", "References", ...refs.map(referenceText));
+  }
+  if (data.structural_note) lines.push("", "Structural note", data.structural_note);
+  const categories = data.categories || [];
+  if (categories.length) lines.push("", "Category Details");
+  else lines.push("", "No meaningful category-level differences surfaced for this story.");
+  categories.forEach(category => {
+    lines.push("", category.label || category.key || "Category", category.paragraph || "");
+    const refs = category.supporting_articles || [];
+    if (refs.length) lines.push("", "References", ...refs.map(referenceText));
+  });
+  const analysisArticles = data.analysis_articles || [];
+  if (analysisArticles.length){
+    lines.push("", "Articles Used in This Analysis");
+    groupArticlesByCountry(analysisArticles).forEach((countryArticles, country) => {
+      lines.push("", country, ...countryArticles.map(referenceText));
+    });
+  }
+  return lines.join("\n").trim() + "\n";
+}
+
+function addReferencesHtml(parts, references){
+  if (!references.length) return;
+  parts.push("<h3>References</h3><ul>");
+  references.forEach(article => {
+    const title = escapeHtml(article.title || "Untitled");
+    const source = escapeHtml(article.source_country || article.outlet || "");
+    const url = safeHttpUrl(article.url || "");
+    const linkedTitle = url
+      ? '<a href="' + escapeAttribute(url) + '">' + title + "</a>"
+      : title;
+    parts.push("<li>" + linkedTitle + (source ? " (" + source + ")" : "") + "</li>");
+  });
+  parts.push("</ul>");
+}
+
+function resultsAsHtml(data){
+  const parts = ['<div><h1>ClearFrame Results</h1>'];
+  if (data.stop_reason){
+    parts.push("<h2>Analysis stopped</h2><p>" + textAsHtml(data.stop_reason) + "</p>");
+  }
+  if (data.summary){
+    parts.push("<h2>Summary</h2><p>" + textAsHtml(data.summary) + "</p>");
+    addReferencesHtml(parts, data.summary_supporting_articles || []);
+  }
+  if (data.structural_note){
+    parts.push("<h2>Structural note</h2><p><em>" + textAsHtml(data.structural_note) + "</em></p>");
+  }
+  const categories = data.categories || [];
+  if (categories.length) parts.push("<h2>Category Details</h2>");
+  else parts.push("<p>No meaningful category-level differences surfaced for this story.</p>");
+  categories.forEach(category => {
+    parts.push("<h3>" + escapeHtml(category.label || category.key || "Category") + "</h3>");
+    parts.push("<p>" + textAsHtml(category.paragraph || "") + "</p>");
+    addReferencesHtml(parts, category.supporting_articles || []);
+  });
+  const analysisArticles = data.analysis_articles || [];
+  if (analysisArticles.length){
+    parts.push("<h2>Articles Used in This Analysis</h2>");
+    addGroupedArticlesHtml(parts, analysisArticles);
+  }
+  parts.push("</div>");
+  return parts.join("");
+}
+
+async function copyResults(){
+  if (!latestResults) return;
+  const plainText = resultsAsPlainText(latestResults);
+  const richHtml = resultsAsHtml(latestResults);
+  const originalLabel = copyResultsBtn.textContent;
+  try {
+    if (navigator.clipboard.write && window.ClipboardItem){
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([richHtml], { type: "text/html" }),
+        "text/plain": new Blob([plainText], { type: "text/plain" }),
+      })]);
+    } else {
+      await navigator.clipboard.writeText(plainText);
+    }
+    copyResultsBtn.textContent = "Copied!";
+  } catch (err) {
+    copyResultsBtn.textContent = "Copy failed";
+  }
+  window.setTimeout(() => { copyResultsBtn.textContent = originalLabel; }, 1800);
+}
+
+copyResultsBtn.onclick = copyResults;
 
 // Colorize a terminal line by its recognizable prefixes/markers.
 function classify(line){
@@ -60,9 +191,15 @@ function appendLine(text){
 }
 
 function renderResults(data){
+  latestResults = data;
+  copyResultsBtn.disabled = false;
   const cats = data.categories || [];
   $("#resCount").textContent = cats.length ? "(" + cats.length + ")" : "";
   let html = "";
+  if (data.stop_reason){
+    html += '<div class="stop-reason"><h3>Analysis stopped</h3>' +
+      escapeHtml(data.stop_reason) + '</div>';
+  }
   if (data.summary){
     html += '<div class="synth"><h3>Summary</h3>' + escapeHtml(data.summary);
     const summaryRefs = data.summary_supporting_articles || [];
@@ -71,9 +208,9 @@ function renderResults(data){
       summaryRefs.forEach(a => {
         const title = a.title || "Untitled";
         const country = a.source_country || a.outlet || "";
-        const url = a.url || "";
+        const url = safeHttpUrl(a.url || "");
         html += '<div style="margin-top:6px">' +
-          (url ? '<a href="' + encodeURI(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
+          (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
           (country ? ' <span class="meta">(' + escapeHtml(country) + ')</span>' : '') +
           '</div>';
       });
@@ -98,9 +235,9 @@ function renderResults(data){
         refs.forEach(a => {
           const title = a.title || "Untitled";
           const outlet = a.outlet || "";
-          const url = a.url || "";
+          const url = safeHttpUrl(a.url || "");
           html += '<div style="margin-top:6px">' +
-            (url ? '<a href="' + encodeURI(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
+            (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
             (outlet ? ' <span class="meta">(' + escapeHtml(outlet) + ')</span>' : '') +
             '</div>';
         });
@@ -108,6 +245,25 @@ function renderResults(data){
       html += '</div>';
     });
     html += '</div></details>';
+  }
+  const analysisArticles = data.analysis_articles || [];
+  if (analysisArticles.length){
+    html += '<section class="used-articles"><h3>Articles Used in This Analysis</h3>' +
+      '<div class="meta">The source article and every comparison article sent to pair analysis.</div>';
+    groupArticlesByCountry(analysisArticles).forEach((countryArticles, country) => {
+      html += '<div class="country-group"><h4>' + escapeHtml(country) + '</h4><ul>';
+      countryArticles.forEach(article => {
+        const title = article.title || "Untitled";
+        const outlet = article.outlet || "";
+        const url = safeHttpUrl(article.url || "");
+        const role = article.role === "source" ? "Source" : "Comparison";
+        html += '<li><span class="article-role">' + escapeHtml(role) + '</span>' +
+          (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
+          (outlet ? ' <span class="meta">(' + escapeHtml(outlet) + ')</span>' : '') + '</li>';
+      });
+      html += '</ul></div>';
+    });
+    html += '</section>';
   }
   resultsEl.innerHTML = html;
 }
@@ -158,6 +314,23 @@ function labelCategory(key){
 function escapeHtml(s){
   return String(s == null ? "" : s)
     .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function escapeAttribute(s){
+  return escapeHtml(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function safeHttpUrl(value){
+  try {
+    const parsed = new URL(String(value || ""));
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+  } catch (_err) {
+    return "";
+  }
+}
+
+function textAsHtml(s){
+  return escapeHtml(s).replace(/\r?\n/g, "<br>");
 }
 
 // Dispatch a single decoded SSE event to the right renderer.
@@ -213,6 +386,8 @@ $("#form").addEventListener("submit", async e => {
   else localStorage.removeItem(KEY_STORE);
 
   consoleEl.innerHTML = ""; resultsEl.innerHTML = ""; analysisEl.innerHTML = ""; rawLog = "";
+  latestResults = null;
+  copyResultsBtn.disabled = true;
   $("#resCount").textContent = "";
   $("#analysisCount").textContent = "";
   showTab("console");

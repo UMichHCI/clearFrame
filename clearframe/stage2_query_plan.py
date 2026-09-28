@@ -16,6 +16,26 @@ ARTICLE_TYPES = {
     "mixed",
 }
 
+# These entities can be actors in a story, but they are not publishing countries
+# accepted by GDELT's sourcecountry operator. Keep this deterministic because an
+# LLM prompt alone cannot guarantee a valid query plan.
+NON_COUNTRY_ACTORS = {
+    "africanunion": "African Union",
+    "arableague": "Arab League",
+    "asean": "ASEAN",
+    "brics": "BRICS",
+    "europeancommission": "European Commission",
+    "europeanparliament": "European Parliament",
+    "europeanunion": "European Union",
+    "eu": "European Union",
+    "g7": "G7",
+    "g20": "G20",
+    "gcc": "Gulf Cooperation Council",
+    "gulfcooperationcouncil": "Gulf Cooperation Council",
+    "nato": "NATO",
+    "unitednations": "United Nations",
+}
+
 
 def make_query_plan(article_text: str, source_url: str, client: OpenAI) -> dict:
     raw = api_chat(
@@ -35,6 +55,16 @@ def quote_if_needed(text: str) -> str:
 
 def normalize_country(text: str) -> str:
     return str(text).strip().lower().replace(" ", "")
+
+
+def find_non_country_actors(countries: list[str]) -> list[str]:
+    """Return named organizations that cannot be GDELT source countries."""
+    invalid = []
+    for country in countries:
+        label = NON_COUNTRY_ACTORS.get(normalize_country(country))
+        if label and label not in invalid:
+            invalid.append(label)
+    return invalid
 
 
 def clean_plan(plan: dict, max_terms: int = 4) -> dict:

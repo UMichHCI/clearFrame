@@ -3,24 +3,16 @@
 from dotenv import load_dotenv
 
 load_dotenv()
-MODEL_MINI   = "gpt-4o-mini"   # lightweight tasks: query plan, classification, topical gate
-MODEL_FULL   = "gpt-4o"        # heavier tasks: outlet context, pair analysis, synthesis
+MODEL_MINI   = "gpt-4o-mini"   # lightweight tasks: query plan and topical gate
+MODEL_FULL   = "gpt-4o"        # heavier tasks: article extraction, pair analysis, synthesis
 
 GDELT_URL    = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-MAX_GDELT_RESULTS       = 50    # deprecated: old global GDELT cap
-GDELT_RESULTS_PER_COUNTRY = 10  # max retained GDELT articles per query country
-GDELT_OVERFETCH_FACTOR = 3      # combined request size multiplier before local capping
-MAX_CANDIDATES_RANK     = 20    # deprecated: all gathered GDELT candidates now go to the topical gate
-MAX_DISPLAY             = 5     # max articles shown to user
-
-# How the topical gate decides same-event relevance:
-#   "metadata" â€” gate on title/domain/date only, then fetch full text for the
-#                survivors. Cheap; the default.
-#   "fulltext" â€” fetch full text for every candidate first, then gate on the
-#                article body. More accurate but many more fetches (higher cost
-#                and rate-limit exposure). Set CLEARFRAME_GATE_MODE in .env to flip.
-GATE_MODE = os.environ.get("CLEARFRAME_GATE_MODE", "metadata").strip().lower()
+GDELT_RESULTS_PER_COUNTRY = 10  # final diverse-article cap per country
+GDELT_OVERFETCH_FACTOR = 3      # candidate-pool multiplier before diversity filtering
+MAX_ARTICLES_PER_OUTLET = 2     # within-country outlet cap
+NEAR_DUP_BODY_THRESHOLD = 0.70  # five-word-shingle Jaccard similarity
+NEAR_DUP_TITLE_THRESHOLD = 0.85 # title-token Jaccard similarity
 
 DEBUG_DUMP_DIR = "debug_runs"   # timestamped per-run JSON dumps, for prompt iteration
 
@@ -30,8 +22,6 @@ STRUCTURAL_NOTE = (
     "These patterns reflect how news systems are structured â€” outlet position, "
     "audience, and sourcing â€” not the intent of individual journalists."
 )
-
-_gdelt_request_count = 0     # debug counter â€” tracks GDELT API calls this run
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # REGIONAL FALLBACK CONFIG

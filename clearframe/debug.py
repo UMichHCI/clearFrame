@@ -2,8 +2,6 @@
 import os
 from datetime import datetime, timezone
 
-import pandas as pd
-
 from .config import DEBUG_DUMP_DIR
 def dump_debug_run(payload: dict, dump_dir: str = DEBUG_DUMP_DIR) -> str:
     """
@@ -20,12 +18,4 @@ def dump_debug_run(payload: dict, dump_dir: str = DEBUG_DUMP_DIR) -> str:
     except Exception as e:
         print(f"  [WARNING] Could not write debug dump: {e}")
         return ""
-
-
-def _df_records(df: pd.DataFrame, drop: tuple[str, ...] = ()) -> list[dict]:
-    """DataFrame -> JSON-serialisable records, optionally dropping heavy columns."""
-    if df is None or df.empty:
-        return []
-    keep = [c for c in df.columns if c not in drop]
-    return json.loads(df[keep].to_json(orient="records", default_handler=str))
 

@@ -11,10 +11,10 @@ _SCRAPE_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-def get_article_text(url: str) -> tuple[str, datetime]:
+def get_article_text(url: str) -> tuple[str, datetime, str]:
     """
-    Fetches and extracts article text and publication date using trafilatura.
-    Returns (text, pub_date). Falls back to ("", today) on failure.
+    Fetches and extracts article text, publication date, and title.
+    Returns (text, pub_date, title). Falls back to ("", today, "") on failure.
     """
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     try:
@@ -24,14 +24,17 @@ def get_article_text(url: str) -> tuple[str, datetime]:
         text = trafilatura.extract(html, include_comments=False, include_tables=False)
         if not text:
             print(f"  [WARNING] trafilatura returned empty content for: {url}")
-            return "", today
+            return "", today, ""
 
         pub_date = today
+        article_title = ""
         try:
             metadata = trafilatura.extract_metadata(html)
-            if metadata and metadata.date:
-                parsed = datetime.fromisoformat(metadata.date.split("T")[0])
-                pub_date = parsed.replace(tzinfo=timezone.utc)
+            if metadata:
+                article_title = str(metadata.title or "").strip()
+                if metadata.date:
+                    parsed = datetime.fromisoformat(metadata.date.split("T")[0])
+                    pub_date = parsed.replace(tzinfo=timezone.utc)
         except Exception:
             pass
 
@@ -40,8 +43,8 @@ def get_article_text(url: str) -> tuple[str, datetime]:
         else:
             print(f"      Publication date: {pub_date.strftime('%Y-%m-%d')}")
 
-        return text[:8000], pub_date
+        return text[:8000], pub_date, article_title
     except Exception as e:
         print(f"  [WARNING] trafilatura failed for {url}: {e}")
-        return "", today
+        return "", today, ""
 

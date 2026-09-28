@@ -1,8 +1,7 @@
 ﻿import pandas as pd
 
 from .config import STRUCTURAL_NOTE
-from .prompts import CHOMSKY_CATEGORIES
-from .stage8_selection import CATEGORY_PLAIN_LABELS
+from .prompts import CATEGORY_PLAIN_LABELS, CHOMSKY_CATEGORIES
 
 
 def print_user_results(category_synthesis: dict) -> None:

@@ -49,6 +49,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
   padding:16px 18px;margin-bottom:8px}
 .synth h3{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--accent-2)}
 .note{color:var(--muted);font-size:13px;font-style:italic;margin:10px 0 22px}
+.stop-reason{background:rgba(255,207,107,.08);border:1px solid rgba(255,207,107,.35);
+  border-radius:10px;padding:16px 18px;margin-bottom:14px;color:var(--text)}
+.stop-reason h3{margin:0 0 7px;font-size:13px;text-transform:uppercase;
+  letter-spacing:.6px;color:var(--warn)}
 .category-details{margin-top:14px}
 .category-details summary{
   display:inline-flex;
@@ -95,6 +99,19 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .card a:hover{text-decoration:underline}
 .empty{color:var(--muted);padding:40px 10px;text-align:center}
 .empty.compact{padding:14px 4px;text-align:left}
+.used-articles{margin-top:24px;padding-top:18px;border-top:1px solid var(--border)}
+.used-articles h3{margin:0 0 4px;font-size:13px;text-transform:uppercase;
+  letter-spacing:.6px;color:var(--accent-2)}
+.country-group{margin-top:16px}
+.country-group h4{margin:0 0 7px;font-size:14px;color:var(--text)}
+.used-articles ul{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}
+.country-group ul{margin-top:0}
+.used-articles li{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.used-articles a{color:var(--accent);text-decoration:none;word-break:break-word}
+.used-articles a:hover{text-decoration:underline}
+.article-role{flex:none;font-size:10px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.5px;color:var(--muted);border:1px solid var(--border);
+  border-radius:999px;padding:1px 6px}
 .analysis-section{margin-bottom:18px}
 .analysis-section h3{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--accent-2)}
 .analysis-card{background:var(--panel-2);border:1px solid var(--border);border-radius:8px}

@@ -33,7 +33,8 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from run import run_clearframe_pipeline, CATEGORY_PLAIN_LABELS
+from clearframe.prompts import CATEGORY_PLAIN_LABELS
+from run import run_clearframe_pipeline
 
 # Bind config. Locally these default to localhost:8000. When hosted (e.g. on
 # Render), set HOST=0.0.0.0 and the platform injects PORT, so the container
@@ -49,6 +50,10 @@ AUTH_PASSWORD = os.environ.get("CLEARFRAME_PASSWORD", "")
 
 # Directory holding the front end (index.html, style.css, app.js).
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# The latest successful Results-tab payload. This intentionally uses one fixed
+# filename so a new run replaces the previous run instead of accumulating files.
+RESULTS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.json")
 
 # Only one pipeline run streams at a time. Redirecting sys.stdout is process
 # global, so serialising runs keeps two concurrent runs from interleaving lines.
@@ -89,7 +94,9 @@ def _summarize_result(result: dict) -> dict:
         "summary": (synthesis.get("summary") or "").strip(),
         "summary_supporting_articles": synthesis.get("summary_supporting_articles", []) or [],
         "structural_note": (synthesis.get("structural_note") or "").strip(),
+        "stop_reason": str(result.get("stop_reason", "") or "").strip(),
         "categories": [],
+        "analysis_articles": _analysis_articles(result),
     }
 
     categories = synthesis.get("categories") or {}
@@ -107,6 +114,53 @@ def _summarize_result(result: dict) -> dict:
     return out
 
 
+def _analysis_articles(result: dict) -> list[dict]:
+    """Return the source and every comparison article sent to pair analysis."""
+    articles: list[dict] = []
+    seen: set[str] = set()
+
+    source_url = str(result.get("source_url", "") or "").strip()
+    if source_url:
+        plan = result.get("plan") or {}
+        source_country = str(plan.get("original_source_country", "") or "") if isinstance(plan, dict) else ""
+        articles.append({
+            "title": str(result.get("source_title", "") or "Your source article"),
+            "outlet": "",
+            "source_country": source_country,
+            "url": source_url,
+            "role": "source",
+        })
+        seen.add(source_url)
+
+    pair_analyses = result.get("pair_analyses") or []
+    if not isinstance(pair_analyses, list):
+        return articles
+
+    for pair in pair_analyses:
+        if not isinstance(pair, dict):
+            continue
+        reference = pair.get("article_reference") or {}
+        if not isinstance(reference, dict):
+            continue
+        url = str(reference.get("url", "") or "").strip()
+        identity = url or "|".join([
+            str(reference.get("title", "") or "").strip(),
+            str(reference.get("outlet", "") or "").strip(),
+        ])
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        articles.append({
+            "title": str(reference.get("title", "") or "Untitled"),
+            "outlet": str(reference.get("outlet", "") or ""),
+            "source_country": str(reference.get("source_country", "") or ""),
+            "url": url,
+            "role": "comparison",
+        })
+
+    return articles
+
+
 def _summarize_llm_analysis(result: dict) -> dict:
     """Structured LLM outputs for inspection. Raw article bodies are omitted."""
     synthesis = result.get("synthesis") or {}
@@ -119,8 +173,21 @@ def _summarize_llm_analysis(result: dict) -> dict:
             "summary": (synthesis.get("summary") or "").strip(),
             "summary_supporting_articles": synthesis.get("summary_supporting_articles", []) or [],
             "categories": synthesis.get("categories") or {},
+            "category_decisions": synthesis.get("category_decisions") or {},
         },
     }
+
+
+def _write_results_json(result_summary: dict) -> None:
+    """Overwrite results.json with exactly the data rendered in the Results tab."""
+    results_tab_data = {
+        key: value
+        for key, value in result_summary.items()
+        if key != "llm_analysis"
+    }
+    with open(RESULTS_JSON_PATH, "w", encoding="utf-8") as results_file:
+        json.dump(results_tab_data, results_file, ensure_ascii=False, indent=2)
+        results_file.write("\n")
 
 
 def _strip_source_from_pair_extractions(pair_analyses) -> list[dict]:
@@ -200,7 +267,9 @@ def stream_pipeline(url: str, api_key: str, sink: "queue.Queue[dict]") -> None:
             sink.put({"type": "line", "text": tb_line})
         sink.put({"type": "error", "text": holder["error"]})
     else:
-        sink.put({"type": "result", "data": _summarize_result(holder.get("result", {}))})
+        result_summary = _summarize_result(holder.get("result", {}))
+        _write_results_json(result_summary)
+        sink.put({"type": "result", "data": result_summary})
 
     sink.put({"type": "done"})
 

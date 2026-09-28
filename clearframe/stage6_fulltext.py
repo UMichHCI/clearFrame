@@ -13,9 +13,8 @@ def fetch_candidate_texts(candidates_df: pd.DataFrame, indices: list[int],
     then GDELT's original order. Full text is fetched for every provided index.
     Candidates whose fetch returns empty text are dropped.
 
-    In "metadata" gate mode, `indices` are the candidates that passed the gate.
-    In "fulltext" gate mode, `indices` are all candidates (the gate runs afterward
-    on the text this fetches).
+    `indices` contains the metadata-unique overfetch pool. The full-text topical
+    gate and diversity selection run after this fetch.
 
     Returns a DataFrame with an `article_text` column and a `row_index` column
     pointing back into candidates_df.
@@ -48,7 +47,7 @@ def fetch_candidate_texts(candidates_df: pd.DataFrame, indices: list[int],
         tag    = "local" if is_local(idx) else "non-local"
 
         print(f"      [{n}/{len(to_fetch)}] ({tag}) {domain} â€” {title[:55]}...")
-        text, _pub_date = get_article_text(url)
+        text, _pub_date, _extracted_title = get_article_text(url)
 
         if not text or not text.strip():
             print("           -> dropped: no text retrieved.")
