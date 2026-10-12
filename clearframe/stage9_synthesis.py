@@ -1,6 +1,7 @@
 ﻿import json
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 
 from openai import OpenAI
 
@@ -13,7 +14,7 @@ CATEGORY_SYNTHESIS_MAX_WORKERS = 6
 
 
 def synthesize_category_paragraphs(pair_analyses: list[dict], base_text: str,
-                                   client: OpenAI) -> dict:
+                                   client: OpenAI, source_reference: dict | None = None) -> dict:
     """Synthesize every eligible category independently and record all decisions."""
     decisions = _empty_category_decisions("No meaningful pair evidence was found.")
     eligible = {
@@ -51,7 +52,7 @@ def synthesize_category_paragraphs(pair_analyses: list[dict], base_text: str,
         for category, decision in decisions.items()
         if decision["include"]
     }
-    overall = synthesize_overall_summary(cleaned_categories, client)
+    overall = synthesize_overall_summary(cleaned_categories, client, source_reference)
 
     return {
         "summary": overall.get("summary", ""),
@@ -97,23 +98,45 @@ def _synthesize_one_category(category: str, pair_extractions: list[dict],
     return _clean_category_decision(json.loads(extract_json(raw)))
 
 
-def synthesize_overall_summary(categories: dict, client: OpenAI) -> dict:
-    """Combine included category paragraphs into one concise summary."""
+def synthesize_overall_summary(
+    categories: dict, client: OpenAI, source_reference: dict | None = None,
+) -> dict:
+    """Explain unexamined assumptions with citations to supplied articles."""
     if not categories:
         return {"summary": "", "supporting_articles": []}
 
-    payload = json.dumps({"categories": categories}, ensure_ascii=False, default=str)
+    references = []
+    seen_urls = set()
+    candidates = [source_reference] if source_reference else []
+    candidates += [
+        article
+        for category in categories.values()
+        for article in category.get("supporting_articles", [])
+    ]
+    for article in candidates:
+        if not isinstance(article, dict):
+            continue
+        url = str(article.get("url", "")).strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        references.append({**article, "citation_id": len(references) + 1})
+
+    payload = json.dumps({
+        "categories": categories,
+        "article_references": references,
+    }, ensure_ascii=False, default=str)
     try:
         raw = api_chat(
             client,
             system=OVERALL_SUMMARY_SYSTEM,
             user=payload,
-            max_tokens=700,
+            max_tokens=1000,
             model=MODEL_FULL,
             response_format={"type": "json_object"},
         )
         parsed = json.loads(extract_json(raw))
-        return _clean_overall_summary(parsed)
+        return _clean_overall_summary(parsed, references)
     except Exception as e:
         print(f"      [WARNING] Overall summary failed: {e}")
         return {"summary": "", "supporting_articles": []}
@@ -183,16 +206,24 @@ def _as_bool(value) -> bool:
     return bool(value)
 
 
-def _clean_overall_summary(value: dict) -> dict:
+def _clean_overall_summary(value: dict, references: list[dict]) -> dict:
     if not isinstance(value, dict):
         return {"summary": "", "supporting_articles": []}
 
-    articles = value.get("supporting_articles", [])
-    if not isinstance(articles, list):
-        articles = []
-    articles = [a for a in articles if isinstance(a, dict)]
-
     summary = _reader_text(str(value.get("summary", "")).strip())
+    if not summary:
+        return {"summary": "", "supporting_articles": []}
+    cited_ids = {int(number) for number in re.findall(r"\[(\d+)\]", summary)}
+    available_ids = {article["citation_id"] for article in references}
+    if not cited_ids or not cited_ids.issubset(available_ids):
+        raise ValueError("Overall summary has missing or unknown article citations.")
+    source_ids = {a["citation_id"] for a in references if a.get("role") == "source"}
+    if source_ids and (
+        not cited_ids.intersection(source_ids) or not cited_ids.difference(source_ids)
+    ):
+        raise ValueError("Overall summary must cite your article and comparison evidence.")
+    # Resolve citations from supplied metadata, never from model-generated URLs.
+    articles = [a for a in references if a["citation_id"] in cited_ids]
     return {
         "summary": _replace_outlets_with_countries(summary, articles),
         "supporting_articles": articles,

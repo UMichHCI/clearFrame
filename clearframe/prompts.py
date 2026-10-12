@@ -1,18 +1,315 @@
 """Centralized LLM prompt text and prompt-facing schemas."""
 
+# GDELT source-country lookup: https://data.gdeltproject.org/api/v2/guides/LOOKUP-COUNTRIES.TXT
+COUNTRY_LOOKUP_TEXT = """
+AF	Afghanistan
+AX	Akrotiri Sovereign Base Area
+AL	Albania
+AG	Algeria
+AQ	American Samoa
+AN	Andorra
+AO	Angola
+AV	Anguilla
+AY	Antarctica
+AC	Antigua and Barbuda
+AR	Argentina
+AM	Armenia
+AA	Aruba
+AT	Ashmore and Cartier Islands
+AS	Australia
+AU	Austria
+AJ	Azerbaijan
+BF	Bahamas, The
+BA	Bahrain
+FQ	Baker Island
+BG	Bangladesh
+BB	Barbados
+BS	Bassas da India
+BO	Belarus
+BE	Belgium
+BH	Belize
+BN	Benin
+BD	Bermuda
+BT	Bhutan
+BL	Bolivia
+BK	Bosnia-Herzegovina
+BC	Botswana
+BV	Bouvet Island
+BR	Brazil
+IO	British Indian Ocean Territory
+VI	British Virgin Islands
+BX	Brunei
+BU	Bulgaria
+UV	Burkina Faso
+BY	Burundi
+CB	Cambodia
+CM	Cameroon
+CA	Canada
+CV	Cape Verde
+CJ	Cayman Islands
+CT	Central African Republic
+CD	Chad
+CI	Chile
+CH	China
+KT	Christmas Island
+IP	Clipperton Island
+CK	Cocos Keeling Islands
+CO	Colombia
+CN	Comoros
+CF	Congo
+CW	Cook Islands
+CR	Coral Sea Islands
+CS	Costa Rica
+IV	Cote dIvoire
+HR	Croatia
+CU	Cuba
+CY	Cyprus
+EZ	Czech Republic
+LO	Czechoslovakia
+CG	Democratic Republic of the Congo
+DA	Denmark
+DX	Dhekelia Sovereign Base Area
+DJ	Djibouti
+DO	Dominica
+DR	Dominican Republic
+TT	East Timor
+EC	Ecuador
+EG	Egypt
+ES	El Salvador
+GV	Equatorial Guinea
+EK	Equatorial Guinea
+ER	Eritrea
+EN	Estonia
+ET	Ethiopia
+PJ	Etorofu, Habomai, Kunashiri and Shikotan Islands
+EU	Europa Island
+FK	Falkland Islands Islas Malvinas
+FO	Faroe Islands
+FJ	Fiji
+FI	Finland
+FR	France
+FG	French Guiana
+FP	French Polynesia
+FS	French Southern and Antarctic Lands
+GB	Gabon
+GA	Gambia
+GZ	Gaza Strip
+GG	Georgia
+GM	Germany
+GH	Ghana
+GI	Gibraltar
+GO	Glorioso Islands
+GR	Greece
+GL	Greenland
+GJ	Grenada
+GP	Guadeloupe
+GQ	Guam
+GT	Guatemala
+GK	Guernsey
+PU	Guinea-Bissau
+GY	Guyana
+HA	Haiti
+HM	Heard Island and McDonald Islands
+HO	Honduras
+HK	Hong Kong
+HQ	Howland Island
+HU	Hungary
+IC	Iceland
+IN	India
+ID	Indonesia
+IR	Iran
+IZ	Iraq
+EI	Ireland
+IM	Isle of Man
+IS	Israel
+IT	Italy
+JM	Jamaica
+JN	Jan Mayen
+JA	Japan
+DQ	Jarvis Island
+JE	Jersey
+JQ	Johnston Atoll
+JO	Jordan
+JU	Juan de Nova Island
+KZ	Kazakhstan
+KE	Kenya
+KQ	Kingman Reef
+KR	Kiribati
+KV	Kosovo
+KU	Kuwait
+KG	Kyrgyzstan
+LA	Laos
+LG	Latvia
+LE	Lebanon
+LT	Lesotho
+LI	Liberia
+LY	Libya
+LS	Liechtenstein
+LH	Lithuania
+LU	Luxembourg
+MC	Macau
+MK	Macedonia
+MA	Madagascar
+MI	Malawi
+MY	Malaysia
+MV	Maldives
+ML	Mali
+MT	Malta
+RM	Marshall Islands
+MB	Martinique
+MR	Mauritania
+MP	Mauritius
+MF	Mayotte
+MX	Mexico
+FM	Micronesia
+MQ	Midway Islands
+MD	Moldova
+MN	Monaco
+MG	Mongolia
+MJ	Montenegro
+MH	Montserrat
+MO	Morocco
+MZ	Mozambique
+BM	Myanmar
+WA	Namibia
+NR	Nauru
+BQ	Navassa Island
+NP	Nepal
+NL	Netherlands
+NT	Netherlands Antilles
+NC	New Caledonia
+NZ	New Zealand
+NU	Nicaragua
+NG	Niger
+NI	Nigeria
+NE	Niue
+NM	No Mans Land
+NF	Norfolk Island
+KN	North Korea
+CQ	Northern Mariana Islands
+NO	Norway
+OS	Oceans
+MU	Oman
+PK	Pakistan
+PS	Palau
+LQ	Palmyra Atoll
+PM	Panama
+PP	Papua New Guinea
+PF	Paracel Islands
+PA	Paraguay
+PE	Peru
+RP	Philippines
+PC	Pitcairn Islands
+PL	Poland
+PO	Portugal
+RQ	Puerto Rico
+QA	Qatar
+RE	Reunion
+RO	Romania
+RS	Russia
+RW	Rwanda
+SH	Saint Helena
+SC	Saint Kitts and Nevis
+ST	Saint Lucia
+RN	Saint Martin
+SB	Saint Pierre and Miquelon
+VC	Saint Vincent and the Grenadines
+TB	Saint-Barthelemy Island
+WS	Samoa
+SM	San Marino
+TP	Sao Tome and Principe
+SA	Saudi Arabia
+SG	Senegal
+RI	Serbia
+SE	Seychelles
+SL	Sierra Leone
+SN	Singapore
+SI	Slovenia
+BP	Solomon Islands
+SO	Somalia
+SF	South Africa
+SX	South Georgia and the South Sandwich Islands
+KS	South Korea
+OD	South Sudan
+SP	Spain
+PG	Spratly Islands
+CE	Sri Lanka
+SU	Sudan
+NS	Suriname
+SV	Svalbard
+WZ	Swaziland
+SW	Sweden
+SZ	Switzerland
+SY	Syria
+TW	Taiwan
+TI	Tajikistan
+TZ	Tanzania
+TH	Thailand
+TO	Togo
+TL	Tokelau
+TN	Tonga
+TD	Trinidad and Tobago
+TE	Tromelin Island
+TS	Tunisia
+TU	Turkey
+TX	Turkmenistan
+TK	Turks and Caicos Islands
+TV	Tuvalu
+UG	Uganda
+UP	Ukraine
+UF	Undersea Features
+UU	Undesignated Sovereignty
+AE	United Arab Emirates
+UK	United Kingdom
+US	United States
+UY	Uruguay
+UZ	Uzbekistan
+NH	Vanuatu
+VT	Vatican City
+VE	Venezuela
+VM	Vietnam, Democratic Republic of
+VQ	Virgin Islands
+WQ	Wake Island
+WF	Wallis and Futuna
+WE	West Bank
+WI	Western Sahara
+YM	Yemen
+ZA	Zambia
+ZI	Zimbabwe
+"""
+
+BLUF_OUTPUT_GUIDANCE = """
+Use BLUF (Bottom Line Up Front) for all explanatory text in the output.
+Start each analysis, explanation, paragraph, or summary with a short, direct statement
+of the exact interpretation or decision you are making. For interpretive findings,
+name the assumption the article takes for granted and what it leaves unexamined.
+Then support that interpretation with specific details from the supplied articles:
+named actors, actions, short quotes, or relevant omissions. Explain how each detail
+supports the interpretation. Keep citations beside the claims wherever required.
+Do not open with an article recap, a quote, a list of observations, a generic contrast,
+or phrases such as "there are differences" or "this reveals bias." Do not save the
+interpretation for the end or leave readers to infer it from the examples.
+Match the certainty of the opening claim to the evidence. If no interpretation is
+supported, state that decision first where an explanation is requested, then explain
+why; keep fields empty wherever the output contract requires it.
+Write the claim directly, without adding a "BLUF" or "Bottom line" label. Preserve
+the required JSON shape, separate evidence fields, and any blocks you must copy exactly.
+"""
+
 QUERY_PLAN_SYSTEM = """
 You create ONE broad GDELT query plan for finding related news articles.
 Respond with a JSON object only: no explanation, no markdown, no extra keys.
 
-The JSON must have exactly these eight top-level keys:
-  "location"                - the city, region, battlefield, or named place where the event is centered (string, never empty)
+The JSON must have exactly these nine top-level keys:
+  "location"                - the city, region, battlefield, or named place where the event is centered; descriptive metadata, not a required search phrase (string, never empty)
   "source_country"          - the main event country containing that location, or the country most directly affected (string, never empty)
   "original_source_country" - the publishing country of the article URL/outlet the user supplied (string, never empty)
   "actor_countries"         - countries directly involved in the event as actors, affected parties, or decision-makers (array of strings)
-  "terms"                   - 3 to 4 short broad topic keywords (array of strings)
+  "terms"                   - 3 to 4 short event-specific search terms (array of strings)
   "article_type"            - breaking_news, ongoing_situation, economics_policy, historical, human_interest, or mixed
-  "window_days_before"      - integer: how many days before the publication date to search
-  "window_days_after"       - integer: how many days after the publication date to search
+  "coverage_start_date"     - estimated first relevant coverage date, YYYY-MM-DD; always required, never null
+  "coverage_end_date"       - estimated last relevant coverage date, YYYY-MM-DD; always required, never null
+  "coverage_period_reason"  - brief explanation of the event timeline, evidence, and uncertainty behind the estimated coverage period (string)
 
 The goal is to find coverage from related countries other than the original
 source article's publishing country. Infer actor_countries from the article text
@@ -26,13 +323,28 @@ actor_countries only if U.S. decisions, weapons, funding, officials, or institut
 are direct parts of the specific story; the query builder will still exclude it
 because it is the original source country.
 
-Choose one article_type and use its matching date window:
-  breaking_news     -> 14 before, 14 after
-  ongoing_situation -> 90 before, 90 after
-  historical        -> 365 before, 180 after
-  economics_policy  -> 180 before, 90 after
-  human_interest    -> 60 before, 60 after
-  mixed             -> 90 before, 90 after
+Choose terms that identify the event or development through its main people, actions,
+commodities, policies, or institutions. Prefer short keywords that different outlets
+would use over long exact phrases or generic themes. For a story about Trump's deal
+for Russian diesel and sanctions relief, terms such as "Trump", "diesel", and "sanctions"
+are more useful than only "energy" and "fuel prices". Terms are searched as alternatives
+with OR for high recall; the later topical filter checks whether candidates cover the
+same development. The location field is metadata and is not automatically added to the
+query. Do not rely on a dateline or announcement venue to identify the story. Include a
+place in terms only when it helps identify the event itself.
+
+Choose one article_type, then independently estimate the period during which other
+news outlets, foreign or domestic, would likely have reported on the same event or
+development. Consider when the event occurred, how long it unfolded, relevant lead-up
+and aftermath, and whether the article discusses a specific incident or a longer-running
+situation. Use dates and temporal cues in the article to justify the endpoints; do not
+assign fixed durations by article type or center the period on publication by default.
+Always provide both dates, even when the timeline is uncertain. Make your best estimate
+from the event context, relative time references, publication date, and current date.
+If no event timing is available, use the publication date as an approximate anchor;
+if that is unavailable or a fetch-time fallback, use the current date. Estimate a
+reporting period appropriate to the development. Explain these assumptions and your
+uncertainty in coverage_period_reason; do not present estimated event dates as facts.
 
 Example output:
 {
@@ -42,22 +354,24 @@ Example output:
   "actor_countries": ["Mexico"],
   "terms": ["cartel", "violence", "drug war"],
   "article_type": "breaking_news",
-  "window_days_before": 14,
-  "window_days_after": 14
+  "coverage_start_date": "2026-09-20",
+  "coverage_end_date": "2026-09-24",
+  "coverage_period_reason": "The article describes an incident on September 20 and related developments through September 24; reporting on that incident likely spans those dates."
 }
 
 Rules:
 - location, source_country, and original_source_country must never be empty strings
 - actor_countries must include source_country unless source_country is only a proxy for a broader region
-- actor_countries should contain sovereign countries that can be used with GDELT's
-  sourcecountry filter, not organizations, unions, blocs, or news outlet locations
-- never return "European Union" as a country; return the directly involved member
-  countries instead, or omit it when no specific member country is directly involved
+- Choose source_country, original_source_country, and actor_countries from the
+  complete GDELT country-code lookup below. Return each selected entry's country
+  name exactly as listed; GDELT accepts these names in sourcecountry filters.
 - do not include the base article's publishing country merely because the outlet is based there
-- terms should be broad for high recall and should not be country names already listed in actor_countries
+- terms should identify the event while allowing differences in wording across outlets;
+  avoid standalone country names already listed in actor_countries
 - article_type must be one of the six listed values
-- the date window must match article_type exactly
-"""
+- coverage_start_date must be on or before coverage_end_date, and neither may be after the supplied current date
+- example dates are illustrative only; infer the period from the supplied article
+""" + "\nComplete GDELT country lookup (FIPS code, name):\n" + COUNTRY_LOOKUP_TEXT + BLUF_OUTPUT_GUIDANCE
 
 TOPICAL_GATE_FULLTEXT_SYSTEM = """
 You are filtering candidate news articles against a base article. This is a filter,
@@ -101,7 +415,7 @@ whose value is an array with one object per candidate:
     }}
   ]
 }}
-"""
+""" + BLUF_OUTPUT_GUIDANCE
 
 CHOMSKY_CATEGORIES = [
     "worthy_unworthy_victims",
@@ -259,7 +573,7 @@ Possible questions to consider:
 
 CATEGORY_ANALYSIS_SCHEMA = {
     "applies": "true | false",
-    "analysis": "<short interpretive analysis if the category applies; empty string if not>",
+    "analysis": "<state the exact interpretation first, then explain the article details supporting it; empty string if the category does not apply>",
     "observations": ["<specific observations grounded in the article>"],
     "evidence": [
         {"quote": "<short quote copied from the article>", "why_it_matters": "<brief reason>"}
@@ -300,7 +614,7 @@ Return ONLY valid JSON with this shape:
     "agency_attribution": { ... }
   }
 }
-"""
+""" + BLUF_OUTPUT_GUIDANCE
 
 ARTICLE_EXTRACTION_USER_TEMPLATE = """\
 ARTICLE
@@ -343,7 +657,9 @@ the comparison article side by side from the supplied texts. These categories sh
 be treated as fully knowable from either article alone; look for asymmetries, contrasts,
 missing alternatives, shifted standards, and discrepancies that appear only in the pair.
 
-For every category, reason in this order:
+For every category, assess the evidence in this order. This is the order for reaching
+an interpretation; present explanatory text with the interpretation first and its
+supporting article details afterward:
 1. Identify the observable contrast in the two texts.
 2. Infer the most specific premise that could organize the user's article's pattern.
 3. State the boundary of debate produced by that premise: what question, judgment, causal
@@ -352,11 +668,23 @@ For every category, reason in this order:
 5. Only when supported, state which institutional or political interest the frame
    structurally advantages. Interest alignment is not proof of coordination or intent.
 
+At each step, assess whether the supplied evidence supports the inference. If it does
+not, do not force a finding or complete the sequence speculatively. When the premise,
+boundary, or comparative explanation cannot be supported, set
+"meaningful_difference": false, preserve any supported observable contrast and its
+textual basis, and leave unsupported inference fields empty. Leave interest_alignment
+empty when interest alignment is unsupported, even if the premise and boundary are
+supported.
+
 Mark "meaningful_difference" true only when the textual contrast supports a non-trivial
 doctrinal inference. A difference in topic, emphasis, tone, or included facts by itself is
 not enough. If several explanations fit, choose the narrowest supported inference and set
-inference_strength accordingly. Do not infer an entire country's or outlet's settled
-doctrine from one article; describe the premise operating in the supplied coverage.
+inference_strength accordingly.
+
+Look for established institutional or political assumptions that shape what the article
+treats as true, how it explains events, and which policies it considers acceptable.
+Identify these assumptions even when they are not stated directly, and show which details
+in the texts support your reading. Do not make statements without an explanation.
 
 Do not write reader-facing paragraphs. Do not rank or score anything. Use structural
 language only. Do not attribute intent to journalists or outlets.
@@ -391,7 +719,7 @@ Return ONLY valid JSON with this shape:
     "smoke_and_discrepancies": { ... }
   }
 }
-"""
+""" + BLUF_OUTPUT_GUIDANCE
 
 PAIR_DIFFERENCE_USER_TEMPLATE = """\
 ROW INDEX
@@ -446,6 +774,52 @@ doctrine they reveal: a premise the user's article treats as settled, the bounda
 legitimate debate that follows from it, and (when supported) the interest structurally
 served by that boundary. Do not make the category pattern itself the main conclusion.
 
+Make the category detail concrete before explaining its wider implications. The reader
+must be able to identify exactly who or what the finding concerns. Connect the specific
+category finding to the assumption it reveals; do not replace it with a generic claim
+about what your article takes for granted that could appear under any category.
+
+For the supplied category, answer these questions explicitly in the paragraph:
+- worthy_unworthy_victims: Name the people or groups whose suffering receives greater
+  concern and those whose suffering receives less concern. Identify the actual harm or
+  risk for each, and explain which gets sympathy, detail, urgency, or accountability.
+  State this unequal treatment in the opening claim. "Worthy" and "unworthy" describe
+  the weight the coverage gives their suffering, not their actual moral worth. Do not
+  call someone a victim without identifying a supported harm, or invent a second group
+  merely to fill the category.
+- agency_attribution: Name who is presented as doing what to whom. Identify whose action
+  or responsibility is made explicit and whose is softened, obscured, or justified.
+  State that attribution in the opening claim, then show the verbs, passive wording,
+  missing agent, or stated justification that supports it. Distinguish responsibility
+  assigned by the article from independently established responsibility; do not invent
+  an unnamed actor or assume passive grammar alone proves an ideological pattern.
+- presuppositions_doctrine: State the exact proposition your article treats as true
+  without arguing for it. Name the actor, institution, action, or policy it concerns.
+  Explain what that assumption makes seem legitimate, necessary, or beyond questioning.
+  Show the labels, claims absorbed into narration, or other details that establish it,
+  and how the comparison exposes it. A topic or attitude such as "security matters"
+  is too vague unless the paragraph specifies whose security and what it permits.
+- selective_criteria: Name the actual standard used to judge a named actor, action,
+  or policy, and the relevant standard given less weight or applied differently.
+  Specify what counts as success, failure, legitimacy, or acceptable cost in each
+  article. State the unequal or narrowed test in the opening claim and support it
+  with concrete judgments from the texts. Do not claim a double standard unless the
+  actors or actions are sufficiently comparable; a hypothetical role reversal alone
+  is not evidence.
+- suppressed_alternative: Name the explanation or policy choice your article makes
+  available and the specific rival account or option it leaves unexplored. Identify
+  the actors and consequences involved, and show which comparison details make the
+  alternative plausible. Do not merely say "other perspectives are missing."
+- smoke_and_discrepancies: Identify the specific speculation or peripheral detail
+  that displaces a substantive question, or the exact disputed claim in the texts.
+  For a discrepancy, state who reports what about the same event and distinguish
+  an actual conflict from differences in timing or scope. Do not decide which is true
+  without evidence or label uncertainty itself as smoke.
+
+Include only category-specific findings supported by the supplied pair evidence.
+Keep unsupported details out; use the existing exclude decision if the category's
+central finding cannot be stated concretely and defended.
+
 - Set "include" to true only if one or more comparison articles show a meaningful,
   text-supported difference that warrants a doctrinal inference, grounded in the paired
   source_article and comparison_article answers and the doctrine fields.
@@ -453,9 +827,12 @@ served by that boundary. Do not make the category pattern itself the main conclu
   actually about a contrast with your article. Also exclude it when you can describe only
   a surface difference and cannot defend an underlying premise.
 - When included, write exactly one concise paragraph.
-- Begin with the doctrinal claim about your article, not with a recap of what each article
-  focuses on. Next explain the boundary it creates. Use the visible contrast only as
-  evidence for those claims.
+- The first sentence must state the exact interpretation of your article as a complete,
+  standalone claim in plain language, naming the relevant people, actors, assumption,
+  or evaluative standard for this category. Explain what it takes for granted and
+  what important question that leaves unexamined. Put supporting quotes and article details in the
+  following sentences, explaining how they support that opening claim. Do not make
+  readers work through an article recap to discover the interpretation.
 - The paragraph is for a reader with no background in media theory. Do not use academic or
   system vocabulary such as "presupposition," "doctrine," "doctrinal floor," "legitimate
   debate," "framing," "agency attribution," "selective criteria," "structural interest,"
@@ -492,6 +869,10 @@ served by that boundary. Do not make the category pattern itself the main conclu
 - Use structural language only. Do not attribute intent to journalists or outlets.
 - Calibrate the wording to the evidence. Prefer "rests on," "treats as given," or
   "makes visible" to claims about what an entire nation, outlet, or journalist believes.
+- Identify settled institutional or political assumptions when the paired evidence
+  supports them. Explain how your article expresses that broader doctrine and distinguish
+  its operation in the supplied coverage from its prevalence across an institution.
+  Do not force an institutional inference when the evidence supports only a narrower premise.
 - Do not stop at formulations such as "your article focuses on X while coverage from Y
   emphasizes Z." Such statements may supply evidence, but they are not a finding.
 - Do not rank articles. Do not score anything. Do not produce an overall synthesis or
@@ -500,6 +881,11 @@ served by that boundary. Do not make the category pattern itself the main conclu
 Before returning, check each paragraph: could a reader understand it without knowing media
 theory, and can the reader point to the exact article details that justify its main claim?
 If either answer is no, rewrite it in plainer and more concrete terms.
+Also check that the first sentence states the interpretation and the rest of the
+paragraph supports it, rather than introducing the main interpretation at the end.
+Could the reader name the affected groups, actor-action relationship, assumed proposition,
+or evaluative standards relevant to this category? If not, rewrite the finding with
+those specifics. If the evidence cannot supply them, exclude the category.
 
 When include is false, leave the claim, paragraph, examples, and supporting_articles empty
 and give a short exclusion_reason. Return ONLY valid JSON, no markdown fences:
@@ -516,17 +902,29 @@ and give a short exclusion_reason. Return ONLY valid JSON, no markdown fences:
   ],
   "exclusion_reason": ""
 }
-"""
+""" + BLUF_OUTPUT_GUIDANCE
 
 OVERALL_SUMMARY_SYSTEM = """
 You are writing the final concise summary for ClearFrame.
 
 You receive doctrine-centered category findings inferred from differences between your
 article and comparison articles. Combine them into one concise, reader-facing diagnosis
-of the deepest well-supported presupposition in your article.
+of the deepest well-supported presupposition in your article. Your task is to explain
+what goes unsaid: the assumptions left unstated, questions left unasked, and plausible
+explanations or policy choices left unexplored. Do not summarize the articles or retell
+the events. Use article details only to show why the inferred gap matters.
+
+You also receive a numbered article_references list. Use its citation_id values to cite
+the exact articles supporting each conclusion, including your article.
 
 Rules:
 - Write 4 to 6 short sentences.
+- Make the first sentence a short, standalone statement of your exact interpretation:
+  the assumption your article takes for granted and the question it leaves unexamined.
+  Include its required citations, then use the remaining sentences to support it with
+  article details and explain why those details justify the interpretation. Do not
+  bury the conclusion in a long opening sentence containing quotes or an event recap,
+  and do not introduce the main interpretation only in the final sentence.
 - Refer to the source article as "your article". Do not write "the source article",
   "base article", or "original article".
 - Write for an average reader: clear, plain, direct language.
@@ -536,7 +934,11 @@ Rules:
   phrases such as "takes for granted," "starts from the idea that," "treats as the main
   question," and "gives little attention to."
 - Lead with what your article takes for granted. Explain what important question this leaves
-  mostly unexamined. Do not call an absent question "non-debatable," "forbidden," or
+  mostly unexamined and how the comparison makes that gap visible. Distinguish an unstated
+  assumption from a missing fact: an omission matters here when it narrows the explanations,
+  judgments, or choices readers are invited to consider. Do not force a claim about what
+  is missing when the category findings do not support it.
+  Do not call an absent question "non-debatable," "forbidden," or
   "suppressed" unless the supplied text explicitly rejects it.
 - Support every main claim with a concrete example. Include at least one specific example
   from your article and one from comparison coverage. An example should name an actor,
@@ -555,22 +957,29 @@ Rules:
 - When referring to comparison coverage, use country names from source_country, not
   outlet domains or URLs. For example, write "coverage from Oman and Iran", not
   "coverage from omanobserver.om and iranherald.com".
-- If the summary relies on specific comparison articles, include them in
-  supporting_articles rather than naming URLs or domains in the summary text.
+- Place numbered citations such as [1] or [1][2] at the end of each sentence making a
+  factual or interpretive claim. Cite your article for claims about its assumptions or
+  omissions, and cite the specific comparison article when its evidence makes them visible.
+  A separate reference list without citations beside the claims is insufficient.
+- Use only citation_id values from article_references. Never invent a source or citation,
+  cite an article merely because it was retrieved, or cite a country's coverage as a whole
+  when the evidence comes from one article. The application builds the reference list from
+  the citations you use; do not return article metadata or URLs.
 - Use structural language only. Do not attribute intent to journalists or outlets.
-- Do not claim that one article proves the doctrine of an entire outlet or country.
+- Preserve supported inferences about settled institutional or political assumptions
+  from the category findings. Distinguish how your article expresses such an assumption
+  from claims about its prevalence or uniform acceptance across an outlet or country;
+  the latter require broader evidence. Do not force a broader inference when unsupported.
 - Do not introduce facts or doctrinal claims not present in the category findings.
 - Do not list categories or write bullets.
 
 Before returning, check the summary: remove any unexplained academic term, and make sure
 each broad conclusion is accompanied by a specific example that lets the reader see how you
-reached it.
+reached it. Check that the paragraph explains what goes unsaid rather than summarizing
+the articles, and that each claim has citations to the exact articles used to support it.
 
 Return ONLY valid JSON, no markdown fences:
 {
-  "summary": "<concise combined summary>",
-  "supporting_articles": [
-    {"title": "<title>", "outlet": "<domain>", "source_country": "<country>", "url": "<url>"}
-  ]
+  "summary": "<concise diagnosis of what goes unsaid, with numbered citations beside the claims>"
 }
-"""
+""" + BLUF_OUTPUT_GUIDANCE

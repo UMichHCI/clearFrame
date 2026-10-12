@@ -19,14 +19,20 @@ There are two ways to run it:
 The pipeline runs in nine stages:
 
 1. **Fetch** the base article text, headline, and publication date (`trafilatura`).
-2. **Query plan** â€” an LLM identifies the article type and builds a structured GDELT search (location, countries, terms, time window).
-3. **Search GDELT** for an overfetched candidate pool, with a regional fallback when needed.
+2. **Query plan** â€” an LLM identifies the article type and builds a structured GDELT search using event-specific terms, publishing countries, and an estimated coverage period. Location is descriptive metadata, not a required search phrase.
+3. **Search GDELT** for an overfetched candidate pool from actor countries. Stop if the search fails or returns no candidates.
 4. **Full-text fetch** for every metadata-unique candidate, local sources first.
 5. **NLP deduplication** clusters near-duplicate full texts within each country and keeps the most complete copy.
 6. **Full-text topical gate** makes one binary "same event?" judgment per remaining article.
 7. **Diversity selection** keeps up to 10 articles per country, no more than two per outlet, preferring different outlets first.
 8. **Pair analysis** compares every selected article with the source across six propaganda-model categories.
 9. **Synthesis + display** combines evidence-backed differences, displays them, and saves a debug record.
+
+Query planning and topical filtering use `gpt-6-luna` with low reasoning effort.
+Article extraction, pair analysis, and synthesis use `gpt-6.1-sol` with medium
+reasoning effort. Models and reasoning settings are configured in
+`clearframe/config.py`. Completion limits include room for internal reasoning;
+reasoning tokens contribute to API costs.
 
 ---
 

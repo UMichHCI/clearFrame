@@ -1,5 +1,5 @@
 ﻿import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from openai import OpenAI
 
@@ -37,15 +37,46 @@ NON_COUNTRY_ACTORS = {
 }
 
 
-def make_query_plan(article_text: str, source_url: str, client: OpenAI) -> dict:
-    raw = api_chat(
-        client,
-        system=QUERY_PLAN_SYSTEM,
-        user=f"Source URL:\n{source_url}\n\nArticle:\n{article_text}",
-        max_tokens=400,
-        response_format={"type": "json_object"}
+def make_query_plan(
+    article_text: str, source_url: str, client: OpenAI,
+    publication_date: datetime | None = None,
+) -> dict:
+    publication_context = (
+        publication_date.strftime("%Y-%m-%d") if publication_date else "unknown"
     )
-    return json.loads(extract_json(raw))
+    context = (
+        f"Source URL:\n{source_url}\n\n"
+        f"Publication date (context only; may be a fetch-time fallback): {publication_context}\n"
+        f"Current date (UTC): {datetime.now(timezone.utc):%Y-%m-%d}\n\n"
+        f"Article:\n{article_text}"
+    )
+    correction = ""
+    for attempt in range(3):
+        raw = api_chat(
+            client,
+            system=QUERY_PLAN_SYSTEM,
+            user=context + correction,
+            max_tokens=700,
+            response_format={"type": "json_object"},
+        )
+        try:
+            plan = json.loads(extract_json(raw))
+            if not isinstance(plan, dict):
+                raise ValueError("Query plan must be a JSON object.")
+            clean_plan(plan)
+            return plan
+        except ValueError as exc:
+            if attempt == 2:
+                raise ValueError(f"Query plan remained invalid after 3 attempts: {exc}") from exc
+            print(f"      [WARNING] Invalid query plan: {exc} Retrying ({attempt + 2}/3)...")
+            correction = (
+                f"\n\nYour previous response:\n{raw}\n\n"
+                f"Validation error: {exc}\n"
+                "Return a corrected complete JSON plan. Supply both coverage dates "
+                "as YYYY-MM-DD; neither may be null or missing. Always estimate the "
+                "reporting period using the article context and supplied dates. "
+                "Explain uncertainty and any approximate timing in coverage_period_reason."
+            )
 
 
 def quote_if_needed(text: str) -> str:
@@ -67,13 +98,35 @@ def find_non_country_actors(countries: list[str]) -> list[str]:
     return invalid
 
 
+def parse_coverage_date(value: str) -> datetime:
+    """Validate the model's date format and return midnight UTC."""
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if parsed.strftime("%Y-%m-%d") != value:
+            raise ValueError
+        return parsed
+    except (TypeError, ValueError):
+        raise ValueError("Query plan: coverage dates must use YYYY-MM-DD.") from None
+
+
 def clean_plan(plan: dict, max_terms: int = 4) -> dict:
     location            = str(plan.get("location", "")).strip()
     source_country      = str(plan.get("source_country", "")).strip()
     original_source_country = str(plan.get("original_source_country", "")).strip()
     article_type        = str(plan.get("article_type", "")).strip().lower()
-    window_days_before  = int(plan.get("window_days_before", 90))
-    window_days_after   = int(plan.get("window_days_after", 90))
+    coverage_start_date = plan.get("coverage_start_date")
+    coverage_end_date = plan.get("coverage_end_date")
+    coverage_period_reason = str(plan.get("coverage_period_reason") or "").strip()
+    if not coverage_period_reason:
+        raise ValueError("Query plan: coverage_period_reason is empty.")
+    if coverage_start_date is None or coverage_end_date is None:
+        raise ValueError("Query plan: both coverage dates are required and must not be null.")
+    start_date = parse_coverage_date(coverage_start_date)
+    end_date = parse_coverage_date(coverage_end_date)
+    if start_date > end_date:
+        raise ValueError("Query plan: coverage_start_date is after coverage_end_date.")
+    if end_date.date() > datetime.now(timezone.utc).date():
+        raise ValueError("Query plan: coverage dates cannot be in the future.")
 
     actor_countries = []
     seen_countries = set()
@@ -99,7 +152,6 @@ def clean_plan(plan: dict, max_terms: int = 4) -> dict:
     for term in plan.get("terms", []):
         term = str(term).strip()
         if (term
-                and term.lower() != location.lower()
                 and term.lower() != source_country.lower()
                 and normalize_country(term) not in actor_country_keys
                 and term not in terms):
@@ -128,24 +180,31 @@ def clean_plan(plan: dict, max_terms: int = 4) -> dict:
             "actor_countries": actor_countries,
             "query_countries": query_countries,
             "terms": terms, "article_type": article_type,
-            "window_days_before": window_days_before,
-            "window_days_after": window_days_after}
+            "coverage_start_date": coverage_start_date,
+            "coverage_end_date": coverage_end_date,
+            "coverage_period_reason": coverage_period_reason}
 
 
 def build_gdelt_query(
-    location: str, terms: list[str], query_countries: list[str],
-    pub_date: datetime, window_days_before: int, window_days_after: int
+    terms: list[str], query_countries: list[str],
+    coverage_start_date: str, coverage_end_date: str,
 ) -> tuple[str, str, str]:
     """
-    Builds a GDELT DOC API query string and the start/end datetime strings.
+    Builds a GDELT DOC API query from topic terms and publishing countries.
+    Location metadata is not a required text match.
     Returns (query, startdatetime, enddatetime).
     GDELT datetime format: YYYYMMDDHHMMSS
     """
     today      = datetime.now(timezone.utc)
-    start_date = pub_date - timedelta(days=window_days_before)
-    end_date   = min(pub_date + timedelta(days=window_days_after), today)
+    start_date = parse_coverage_date(coverage_start_date)
+    # Include the whole final day, capped at the current instant.
+    end_date = min(
+        parse_coverage_date(coverage_end_date).replace(hour=23, minute=59, second=59),
+        today,
+    )
+    if start_date > end_date:
+        raise ValueError("Query plan: coverage period has no searchable dates.")
 
-    loc    = quote_if_needed(location)
     tparts = " OR ".join(quote_if_needed(t) for t in terms)
     countries = []
     for country in query_countries:
@@ -153,11 +212,9 @@ def build_gdelt_query(
         if ctry and ctry not in countries:
             countries.append(ctry)
     cparts = " OR ".join(f"sourcecountry:{ctry}" for ctry in countries)
-    query  = f"{loc} AND ({tparts}) AND ({cparts})"
+    query  = f"({tparts}) AND ({cparts})"
 
     start_str = start_date.strftime("%Y%m%d%H%M%S")
     end_str   = end_date.strftime("%Y%m%d%H%M%S")
     return query, start_str, end_str
-
-
 

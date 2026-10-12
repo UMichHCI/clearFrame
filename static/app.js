@@ -10,6 +10,15 @@ const keyEl = $("#apiKey"), rememberEl = $("#remember");
 const copyResultsBtn = $("#copyResults");
 let running = false, rawLog = "", latestResults = null;
 
+const CATEGORY_DESCRIPTIONS = {
+  worthy_unworthy_victims: "Whose suffering gets attention and sympathy, and whose receives less concern.",
+  agency_attribution: "Who is shown as doing what to whom, and whose responsibility is made clear or softened.",
+  presuppositions_doctrine: "Which political or institutional assumptions the article treats as given rather than questions to debate.",
+  selective_criteria: "Which standards are used to judge actors and actions, and which are downplayed or applied differently.",
+  suppressed_alternative: "Which plausible explanations or policy choices the article leaves unexplored or dismisses.",
+  smoke_and_discrepancies: "Where speculation or side issues obscure substantive questions, and where the articles' factual claims differ.",
+};
+
 // Restore a remembered key from this browser (opt-in only).
 const KEY_STORE = "clearframe.openai_key";
 const savedKey = localStorage.getItem(KEY_STORE);
@@ -41,7 +50,19 @@ function referenceText(article){
   const title = article.title || "Untitled";
   const source = article.source_country || article.outlet || "";
   const url = article.url || "";
-  return "- " + title + (source ? " (" + source + ")" : "") + (url ? ": " + url : "");
+  const number = article.citation_id ? "[" + article.citation_id + "] " : "";
+  return "- " + number + title + (source ? " (" + source + ")" : "") + (url ? ": " + url : "");
+}
+
+function summaryAsHtml(summary, references){
+  const byId = new Map(references.map(article => [String(article.citation_id), article]));
+  return textAsHtml(summary).replace(/\[(\d+)\]/g, (marker, number) => {
+    const article = byId.get(number);
+    const url = article ? safeHttpUrl(article.url || "") : "";
+    return url
+      ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + marker + '</a>'
+      : marker;
+  });
 }
 
 function groupArticlesByCountry(articles){
@@ -60,12 +81,12 @@ function addGroupedArticlesHtml(parts, articles){
     countryArticles.forEach(article => {
       const title = escapeHtml(article.title || "Untitled");
       const outlet = escapeHtml(article.outlet || "");
-      const role = article.role === "source" ? "Source" : "Comparison";
+      const sourceTag = article.role === "source" ? "[Source] " : "";
       const url = safeHttpUrl(article.url || "");
       const linkedTitle = url
         ? '<a href="' + escapeAttribute(url) + '">' + title + "</a>"
         : title;
-      parts.push("<li>[" + escapeHtml(role) + "] " + linkedTitle +
+      parts.push("<li>" + sourceTag + linkedTitle +
         (outlet ? " (" + outlet + ")" : "") + "</li>");
     });
     parts.push("</ul>");
@@ -85,7 +106,10 @@ function resultsAsPlainText(data){
   if (categories.length) lines.push("", "Category Details");
   else lines.push("", "No meaningful category-level differences surfaced for this story.");
   categories.forEach(category => {
-    lines.push("", category.label || category.key || "Category", category.paragraph || "");
+    lines.push("", category.label || category.key || "Category");
+    const description = CATEGORY_DESCRIPTIONS[category.key];
+    if (description) lines.push(description);
+    lines.push(category.paragraph || "");
     const refs = category.supporting_articles || [];
     if (refs.length) lines.push("", "References", ...refs.map(referenceText));
   });
@@ -109,7 +133,8 @@ function addReferencesHtml(parts, references){
     const linkedTitle = url
       ? '<a href="' + escapeAttribute(url) + '">' + title + "</a>"
       : title;
-    parts.push("<li>" + linkedTitle + (source ? " (" + source + ")" : "") + "</li>");
+    const number = article.citation_id ? "[" + escapeHtml(String(article.citation_id)) + "] " : "";
+    parts.push("<li>" + number + linkedTitle + (source ? " (" + source + ")" : "") + "</li>");
   });
   parts.push("</ul>");
 }
@@ -120,7 +145,7 @@ function resultsAsHtml(data){
     parts.push("<h2>Analysis stopped</h2><p>" + textAsHtml(data.stop_reason) + "</p>");
   }
   if (data.summary){
-    parts.push("<h2>Summary</h2><p>" + textAsHtml(data.summary) + "</p>");
+    parts.push("<h2>Summary</h2><p>" + summaryAsHtml(data.summary, data.summary_supporting_articles || []) + "</p>");
     addReferencesHtml(parts, data.summary_supporting_articles || []);
   }
   if (data.structural_note){
@@ -131,6 +156,8 @@ function resultsAsHtml(data){
   else parts.push("<p>No meaningful category-level differences surfaced for this story.</p>");
   categories.forEach(category => {
     parts.push("<h3>" + escapeHtml(category.label || category.key || "Category") + "</h3>");
+    const description = CATEGORY_DESCRIPTIONS[category.key];
+    if (description) parts.push("<p><em>" + escapeHtml(description) + "</em></p>");
     parts.push("<p>" + textAsHtml(category.paragraph || "") + "</p>");
     addReferencesHtml(parts, category.supporting_articles || []);
   });
@@ -201,15 +228,17 @@ function renderResults(data){
       escapeHtml(data.stop_reason) + '</div>';
   }
   if (data.summary){
-    html += '<div class="synth"><h3>Summary</h3>' + escapeHtml(data.summary);
     const summaryRefs = data.summary_supporting_articles || [];
+    html += '<div class="synth"><h3>Summary</h3>' + summaryAsHtml(data.summary, summaryRefs);
     if (summaryRefs.length){
       html += '<div class="meta" style="margin-top:10px">References</div>';
       summaryRefs.forEach(a => {
         const title = a.title || "Untitled";
         const country = a.source_country || a.outlet || "";
         const url = safeHttpUrl(a.url || "");
+        const number = a.citation_id ? "[" + escapeHtml(String(a.citation_id)) + "] " : "";
         html += '<div style="margin-top:6px">' +
+          number +
           (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
           (country ? ' <span class="meta">(' + escapeHtml(country) + ')</span>' : '') +
           '</div>';
@@ -226,8 +255,10 @@ function renderResults(data){
     html += '<details class="category-details"><summary>Category Details</summary><div class="details-body">';
     cats.forEach(c => {
       const refs = c.supporting_articles || [];
+      const description = CATEGORY_DESCRIPTIONS[c.key];
       html += '<div class="card"><div class="top">' +
-        '<div><div class="title">' + escapeHtml(c.label || c.key || "Category") + '</div></div>' +
+        '<div><div class="title">' + escapeHtml(c.label || c.key || "Category") + '</div>' +
+        (description ? '<div class="category-description">' + escapeHtml(description) + '</div>' : '') + '</div>' +
         '</div>' +
         '<div class="why">' + escapeHtml(c.paragraph) + '</div>';
       if (refs.length){
@@ -256,8 +287,9 @@ function renderResults(data){
         const title = article.title || "Untitled";
         const outlet = article.outlet || "";
         const url = safeHttpUrl(article.url || "");
-        const role = article.role === "source" ? "Source" : "Comparison";
-        html += '<li><span class="article-role">' + escapeHtml(role) + '</span>' +
+        const sourceTag = article.role === "source"
+          ? '<span class="article-role">Source</span>' : '';
+        html += '<li>' + sourceTag +
           (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
           (outlet ? ' <span class="meta">(' + escapeHtml(outlet) + ')</span>' : '') + '</li>';
       });
