@@ -3,11 +3,34 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from clearframe.prompts import CHOMSKY_CATEGORIES
-from clearframe.stage9_synthesis import synthesize_category_paragraphs, synthesize_overall_summary
+from clearframe.prompts import CATEGORY_SYNTHESIS_GUIDES, CHOMSKY_CATEGORIES
+from clearframe.stage9_synthesis import (
+    _synthesize_one_category,
+    synthesize_category_paragraphs,
+    synthesize_overall_summary,
+)
 
 
 class CategorySynthesisTests(unittest.TestCase):
+    def test_each_category_call_contains_only_its_own_guide_and_evidence(self):
+        for category in CHOMSKY_CATEGORIES:
+            with self.subTest(category=category), patch(
+                "clearframe.stage9_synthesis.api_chat",
+                return_value=json.dumps({"include": False}),
+            ) as mocked:
+                evidence = [{"category_answer": {"difference": f"Evidence for {category}"}}]
+                _synthesize_one_category(category, evidence, "Source text", object())
+
+                system = mocked.call_args.kwargs["system"]
+                self.assertIn(CATEGORY_SYNTHESIS_GUIDES[category], system)
+                for other in CHOMSKY_CATEGORIES:
+                    if other != category:
+                        self.assertNotIn(CATEGORY_SYNTHESIS_GUIDES[other], system)
+                        self.assertNotIn(other, system)
+                payload = json.loads(mocked.call_args.kwargs["user"])
+                self.assertEqual(payload["category"], category)
+                self.assertEqual(payload["meaningful_pair_extractions"], evidence)
+
     def test_synthesizes_eligible_categories_independently(self):
         meaningful_categories = {
             "worthy_unworthy_victims",
@@ -49,7 +72,7 @@ class CategorySynthesisTests(unittest.TestCase):
                     "exclusion_reason": "",
                 })
             return json.dumps({
-                "summary": "Overall conclusion. [1]",
+                "summary": "Overall conclusion.",
                 "supporting_articles": [],
             })
 
@@ -60,9 +83,11 @@ class CategorySynthesisTests(unittest.TestCase):
         self.assertEqual(set(category_calls), meaningful_categories)
         self.assertEqual(set(result["categories"]), meaningful_categories)
         self.assertEqual(mocked.call_count, len(meaningful_categories) + 1)
-        self.assertEqual(result["summary"], "Overall conclusion. [1]")
-        self.assertEqual(result["summary_supporting_articles"][0]["url"],
-                         pair_analyses[0]["article_reference"]["url"])
+        self.assertEqual(result["summary"], "Overall conclusion.")
+        self.assertEqual(result["summary_supporting_articles"], [])
+        for category in meaningful_categories:
+            self.assertEqual(result["categories"][category]["supporting_articles"],
+                             [pair_analyses[0]["article_reference"]])
         for category in meaningful_categories:
             self.assertTrue(result["category_decisions"][category]["include"])
         for category in set(CHOMSKY_CATEGORIES) - meaningful_categories:
@@ -87,38 +112,60 @@ class CategorySynthesisTests(unittest.TestCase):
             for decision in result["category_decisions"].values()
         ))
 
-    def test_summary_resolves_citations_to_supplied_articles(self):
+    def test_narrative_receives_all_findings_and_returns_one_uncited_paragraph(self):
         source = {"title": "Your article", "url": "https://source.example", "role": "source"}
-        comparison = {"title": "Comparison", "url": "https://comparison.example", "source_country": "Oman"}
-        unused = {"title": "Unused", "url": "https://unused.example"}
+        oman = {"title": "Oman article", "url": "https://oman.example", "source_country": "Oman"}
+        iran = {"title": "Iran article", "url": "https://iran.example", "source_country": "Iran"}
+        israel = {"title": "Israel article", "url": "https://israel.example", "source_country": "Israel"}
         categories = {
-            "first": {"supporting_articles": [comparison, unused]},
-            "second": {"supporting_articles": [comparison]},
+            "responsibility": {"paragraph": "Different accounts of responsibility.", "supporting_articles": [oman, iran]},
+            "consequences": {"paragraph": "Different accounts of regional costs.", "supporting_articles": [israel, oman]},
         }
-        response = json.dumps({
-            "summary": "Your article leaves the costs unexamined. [1] Coverage from Oman names those costs. [2]",
+        narrative = (
+            "Your article presents pressure as a path to agreement. Other accounts raise "
+            "different questions about what would make an agreement possible."
+            "\n\nCoverage from Oman considers the risk of renewed fighting. Coverage from Iran "
+            "presents ending attacks as a condition for progress. The article from Israel "
+            "adds the concerns of neighboring countries."
+            "\n\nTogether these perspectives broaden the question from how to secure a deal "
+            "to what its costs and conditions might be."
+        )
+        with patch("clearframe.stage9_synthesis.api_chat", return_value=json.dumps({
+            "summary": narrative,
             "supporting_articles": [{"url": "https://invented.example"}],
-        })
-        with patch("clearframe.stage9_synthesis.api_chat", return_value=response) as mocked:
+        })) as mocked:
             result = synthesize_overall_summary(categories, object(), source)
 
         payload = json.loads(mocked.call_args.kwargs["user"])
-        self.assertEqual(len(payload["article_references"]), 3)
-        self.assertEqual([a["url"] for a in result["supporting_articles"]],
-                         [source["url"], comparison["url"]])
-        self.assertEqual([a["citation_id"] for a in result["supporting_articles"]], [1, 2])
+        self.assertEqual(payload["categories"], categories)
+        self.assertEqual(payload["article_references"], [source, oman, iran, israel])
+        self.assertEqual(result, {"summary": narrative.replace("\n\n", " "), "supporting_articles": []})
 
-    def test_summary_rejects_missing_unknown_or_one_sided_citations(self):
-        source = {"title": "Your article", "url": "https://source.example", "role": "source"}
-        categories = {"first": {"supporting_articles": [{"url": "https://comparison.example"}]}}
-        for summary in ("Uncited conclusion.", "Invented citation. [1][99]",
-                        "Only source. [1]", "Only comparison. [2]"):
-            with self.subTest(summary=summary), patch(
-                "clearframe.stage9_synthesis.api_chat",
-                return_value=json.dumps({"summary": summary}),
+    def test_summary_removes_stray_citations_and_joins_paragraphs(self):
+        comparison = {
+            "outlet": "oman.example", "source_country": "Oman", "url": "https://oman.example"
+        }
+        categories = {"first": {"supporting_articles": [comparison]}}
+        response = {"summary": "The source article asks about a deal. [1][99]\n\nThe article from oman.example asks about costs. [2]"}
+        with patch("clearframe.stage9_synthesis.api_chat", return_value=json.dumps(response)):
+            result = synthesize_overall_summary(categories, object())
+        self.assertEqual(result, {
+            "summary": "Your article asks about a deal. The article from Oman asks about costs.",
+            "supporting_articles": [],
+        })
+
+    def test_empty_or_failed_summary_does_not_erase_category_findings(self):
+        categories = {"first": {"paragraph": "A supported finding.", "supporting_articles": []}}
+        for response in ({"summary": ""}, []):
+            with self.subTest(response=response), patch(
+                "clearframe.stage9_synthesis.api_chat", return_value=json.dumps(response)
             ):
-                result = synthesize_overall_summary(categories, object(), source)
+                result = synthesize_overall_summary(categories, object())
             self.assertEqual(result, {"summary": "", "supporting_articles": []})
+        with patch("clearframe.stage9_synthesis.api_chat", side_effect=RuntimeError("Unavailable")):
+            self.assertEqual(synthesize_overall_summary(categories, object()),
+                             {"summary": "", "supporting_articles": []})
+        self.assertEqual(categories["first"]["paragraph"], "A supported finding.")
 
 
 if __name__ == "__main__":

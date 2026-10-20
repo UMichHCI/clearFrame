@@ -48,12 +48,12 @@ def print_user_results(category_synthesis: dict) -> None:
         print()
     if not categories:
         if not summary:
-            print("No meaningful category-level differences surfaced for this story.")
+            print("The comparison did not find clear evidence of an important difference in how these articles explain the story.")
         print(f"\n{STRUCTURAL_NOTE}")
         print(f"{'='*70}")
         return
 
-    print("CATEGORY DETAILS")
+    print("FINDINGS EXPLAINED")
     for category in CHOMSKY_CATEGORIES:
         item = categories.get(category)
         if not isinstance(item, dict):

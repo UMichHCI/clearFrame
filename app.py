@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 import pandas as pd
 
 from clearframe.prompts import CATEGORY_PLAIN_LABELS
+from clearframe.report import REPORT_PATH, write_results_html
 from run import run_clearframe_pipeline
 
 # Bind config. Locally these default to localhost:8000. When hosted (e.g. on
@@ -54,6 +55,7 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # The latest successful Results-tab payload. This intentionally uses one fixed
 # filename so a new run replaces the previous run instead of accumulating files.
 RESULTS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.json")
+RESULTS_HTML_PATH = REPORT_PATH
 
 # Only one pipeline run streams at a time. Redirecting sys.stdout is process
 # global, so serialising runs keeps two concurrent runs from interleaving lines.
@@ -179,7 +181,7 @@ def _summarize_llm_analysis(result: dict) -> dict:
 
 
 def _write_results_json(result_summary: dict) -> None:
-    """Overwrite results.json with exactly the data rendered in the Results tab."""
+    """Refresh the JSON snapshot and standalone HTML from the same Results-tab data."""
     results_tab_data = {
         key: value
         for key, value in result_summary.items()
@@ -188,6 +190,7 @@ def _write_results_json(result_summary: dict) -> None:
     with open(RESULTS_JSON_PATH, "w", encoding="utf-8") as results_file:
         json.dump(results_tab_data, results_file, ensure_ascii=False, indent=2)
         results_file.write("\n")
+    write_results_html(results_tab_data, RESULTS_HTML_PATH)
 
 
 def _strip_source_from_pair_extractions(pair_analyses) -> list[dict]:

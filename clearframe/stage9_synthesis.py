@@ -7,7 +7,12 @@ from openai import OpenAI
 
 from .config import MODEL_FULL, STRUCTURAL_NOTE
 from .llm import api_chat, extract_json
-from .prompts import CATEGORY_SYNTHESIS_SYSTEM, CHOMSKY_CATEGORIES, OVERALL_SUMMARY_SYSTEM
+from .prompts import (
+    CATEGORY_SYNTHESIS_GUIDES,
+    CATEGORY_SYNTHESIS_SYSTEM,
+    CHOMSKY_CATEGORIES,
+    OVERALL_SUMMARY_SYSTEM,
+)
 
 
 CATEGORY_SYNTHESIS_MAX_WORKERS = 6
@@ -89,7 +94,12 @@ def _synthesize_one_category(category: str, pair_extractions: list[dict],
     }, ensure_ascii=False, default=str)
     raw = api_chat(
         client,
-        system=CATEGORY_SYNTHESIS_SYSTEM,
+        system=(
+            CATEGORY_SYNTHESIS_SYSTEM
+            + f"\nFor the supplied category ({category}), the first sentence MUST explicitly "
+            + "answer the category question as specified below:\n"
+            + CATEGORY_SYNTHESIS_GUIDES[category]
+        ),
         user=payload,
         max_tokens=1400,
         model=MODEL_FULL,
@@ -101,7 +111,7 @@ def _synthesize_one_category(category: str, pair_extractions: list[dict],
 def synthesize_overall_summary(
     categories: dict, client: OpenAI, source_reference: dict | None = None,
 ) -> dict:
-    """Explain unexamined assumptions with citations to supplied articles."""
+    """Synthesize the assumptions and limits revealed across category findings."""
     if not categories:
         return {"summary": "", "supporting_articles": []}
 
@@ -120,7 +130,7 @@ def synthesize_overall_summary(
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        references.append({**article, "citation_id": len(references) + 1})
+        references.append(article)
 
     payload = json.dumps({
         "categories": categories,
@@ -131,7 +141,7 @@ def synthesize_overall_summary(
             client,
             system=OVERALL_SUMMARY_SYSTEM,
             user=payload,
-            max_tokens=1000,
+            max_tokens=1400,
             model=MODEL_FULL,
             response_format={"type": "json_object"},
         )
@@ -213,20 +223,12 @@ def _clean_overall_summary(value: dict, references: list[dict]) -> dict:
     summary = _reader_text(str(value.get("summary", "")).strip())
     if not summary:
         return {"summary": "", "supporting_articles": []}
-    cited_ids = {int(number) for number in re.findall(r"\[(\d+)\]", summary)}
-    available_ids = {article["citation_id"] for article in references}
-    if not cited_ids or not cited_ids.issubset(available_ids):
-        raise ValueError("Overall summary has missing or unknown article citations.")
-    source_ids = {a["citation_id"] for a in references if a.get("role") == "source"}
-    if source_ids and (
-        not cited_ids.intersection(source_ids) or not cited_ids.difference(source_ids)
-    ):
-        raise ValueError("Overall summary must cite your article and comparison evidence.")
-    # Resolve citations from supplied metadata, never from model-generated URLs.
-    articles = [a for a in references if a["citation_id"] in cited_ids]
+    # Older model habits may leave numbered markers; the narrative needs no citations.
+    summary = re.sub(r"[ \t]*\[\d+\]", "", summary).strip()
+    summary = re.sub(r"\s*\r?\n\s*", " ", summary)
     return {
-        "summary": _replace_outlets_with_countries(summary, articles),
-        "supporting_articles": articles,
+        "summary": _replace_outlets_with_countries(summary, references),
+        "supporting_articles": [],
     }
 
 

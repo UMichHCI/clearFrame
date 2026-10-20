@@ -278,24 +278,6 @@ ZA	Zambia
 ZI	Zimbabwe
 """
 
-BLUF_OUTPUT_GUIDANCE = """
-Use BLUF (Bottom Line Up Front) for all explanatory text in the output.
-Start each analysis, explanation, paragraph, or summary with a short, direct statement
-of the exact interpretation or decision you are making. For interpretive findings,
-name the assumption the article takes for granted and what it leaves unexamined.
-Then support that interpretation with specific details from the supplied articles:
-named actors, actions, short quotes, or relevant omissions. Explain how each detail
-supports the interpretation. Keep citations beside the claims wherever required.
-Do not open with an article recap, a quote, a list of observations, a generic contrast,
-or phrases such as "there are differences" or "this reveals bias." Do not save the
-interpretation for the end or leave readers to infer it from the examples.
-Match the certainty of the opening claim to the evidence. If no interpretation is
-supported, state that decision first where an explanation is requested, then explain
-why; keep fields empty wherever the output contract requires it.
-Write the claim directly, without adding a "BLUF" or "Bottom line" label. Preserve
-the required JSON shape, separate evidence fields, and any blocks you must copy exactly.
-"""
-
 QUERY_PLAN_SYSTEM = """
 You create ONE broad GDELT query plan for finding related news articles.
 Respond with a JSON object only: no explanation, no markdown, no extra keys.
@@ -371,7 +353,7 @@ Rules:
 - article_type must be one of the six listed values
 - coverage_start_date must be on or before coverage_end_date, and neither may be after the supplied current date
 - example dates are illustrative only; infer the period from the supplied article
-""" + "\nComplete GDELT country lookup (FIPS code, name):\n" + COUNTRY_LOOKUP_TEXT + BLUF_OUTPUT_GUIDANCE
+""" + "\nComplete GDELT country lookup (FIPS code, name):\n" + COUNTRY_LOOKUP_TEXT
 
 TOPICAL_GATE_FULLTEXT_SYSTEM = """
 You are filtering candidate news articles against a base article. This is a filter,
@@ -415,7 +397,7 @@ whose value is an array with one object per candidate:
     }}
   ]
 }}
-""" + BLUF_OUTPUT_GUIDANCE
+"""
 
 CHOMSKY_CATEGORIES = [
     "worthy_unworthy_victims",
@@ -614,7 +596,7 @@ Return ONLY valid JSON with this shape:
     "agency_attribution": { ... }
   }
 }
-""" + BLUF_OUTPUT_GUIDANCE
+"""
 
 ARTICLE_EXTRACTION_USER_TEMPLATE = """\
 ARTICLE
@@ -719,7 +701,7 @@ Return ONLY valid JSON with this shape:
     "smoke_and_discrepancies": { ... }
   }
 }
-""" + BLUF_OUTPUT_GUIDANCE
+"""
 
 PAIR_DIFFERENCE_USER_TEMPLATE = """\
 ROW INDEX
@@ -761,64 +743,106 @@ OUTPUT SHAPE FOR DIFFERENCES
 {difference_schema}
 """
 
+READER_OUTPUT_GUIDANCE = """
+Shared readability requirements (take priority over other style guidance):
+Write as if explaining the finding aloud to someone who knows nothing about media theory,
+political science, or the academic vocabulary of framing. Use plain language and concrete examples.
+It should be understandable to a person with an average high school reading level.
+Avoid jargon, technical terms, and academic vocabulary.
+"""
+
+COUNTRY_CONTEXT_GUIDANCE = """
+Use country-specific background knowledge to help explain the observed differences.
+Go beyond naming a viewpoint: explain why this particular actor or outlet might find
+that interpretation convincing or useful. Relevant context includes historical relations,
+alliances and rivalries, security concerns, economic ties, domestic politics, and the
+outlet's ownership, independence, audience, or relationship with the government when known.
+Apply this scrutiny to your article's country and its allies as well as its opponents.
+
+Distinguish two questions: does the stated objection have a sound basis, and does making
+that objection also serve a political interest? Both can be true. A country can identify
+a real harm while using it to weaken a rival. A strategic benefit does not by itself
+make an objection false, and a reasonable objection does not establish consistent concern.
+"""
+
+CATEGORY_SYNTHESIS_GUIDES = {
+    "worthy_unworthy_victims": """
+The first sentence MUST explicitly name whose harm gets more attention, whose gets
+less, and the actual harm involved. Do not merely announce unequal concern or leave
+the affected groups for later sentences.
+Name the people or groups whose suffering receives greater
+concern and those whose suffering receives less concern. Identify the actual harm or
+risk for each, and explain which gets sympathy, detail, urgency, or accountability.
+State this unequal treatment in the opening claim. "Worthy" and "unworthy" describe
+the weight the coverage gives their suffering, not their actual moral worth. Do not
+call someone a victim without identifying a supported harm, or invent a second group
+merely to fill the category.
+""",
+    "agency_attribution": """
+The first sentence MUST explicitly name who your article blames, excuses, or leaves
+unnamed, and for which action or consequence. If the finding concerns unequal treatment
+of actors, name both actors and how responsibility is assigned differently.
+Identify whose action
+or responsibility is made explicit and whose is softened, obscured, or justified.
+State that attribution in the opening claim, then show the verbs, passive wording,
+missing agent, or stated justification that supports it. Distinguish responsibility
+assigned by the article from independently established responsibility; do not invent
+an unnamed actor or assume passive grammar alone proves an ideological pattern.
+""",
+    "presuppositions_doctrine": """
+The first sentence MUST explicitly state the idea your article accepts without
+examining it, naming the actor, action, or policy concerned. State the actual idea
+as a complete proposition, not just that the article makes an assumption.
+State the exact proposition your article treats as true
+without arguing for it. Name the actor, institution, action, or policy it concerns.
+Explain what that assumption makes seem legitimate, necessary, or beyond questioning.
+Show the labels, claims absorbed into narration, or other details that establish it,
+and how the comparison exposes it. A topic or attitude such as "security matters"
+is too vague unless the paragraph specifies whose security and what it permits.
+""",
+    "selective_criteria": """
+The first sentence MUST explicitly state how your article judges a named action or
+actor: what counts as success, failure, or acceptable cost, and which relevant test
+receives less weight or is applied differently. Do not just say standards differ.
+Name the actual standard used to judge a named actor, action,
+or policy, and the relevant standard given less weight or applied differently.
+Specify what counts as success, failure, legitimacy, or acceptable cost in each
+article. State the unequal or narrowed test in the opening claim and support it
+with concrete judgments from the texts. Do not claim a double standard unless the
+actors or actions are sufficiently comparable; a hypothetical role reversal alone
+is not evidence.
+""",
+    "suppressed_alternative": """
+The first sentence MUST explicitly name the explanation or choice your article
+presents and the specific alternative it leaves unexplored or dismisses. Do not
+just say another perspective is missing.
+Name the explanation or policy choice your article makes
+available and the specific rival account or option it leaves unexplored. Identify
+the actors and consequences involved, and show which comparison details make the
+alternative plausible. Do not merely say "other perspectives are missing."
+""",
+    "smoke_and_discrepancies": """
+The first sentence MUST explicitly identify either the distraction and the important
+question it displaces, or the conflicting claims and who makes each one. Use only
+the supported finding; do not force both a distraction and a factual discrepancy.
+Identify the specific speculation or peripheral detail
+that displaces a substantive question, or the exact disputed claim in the texts.
+For a discrepancy, state who reports what about the same event and distinguish
+an actual conflict from differences in timing or scope. Do not decide which is true
+without evidence or label uncertainty itself as smoke.
+""",
+}
+
 CATEGORY_SYNTHESIS_SYSTEM = """
 You synthesize one ClearFrame category independently from every other category.
 
 You receive one category name and only the article-pair analyses for that category.
 Decide whether its evidence is strong enough to surface, then return an explicit
-include-or-exclude decision. Do not consider whether another category might express a
-similar conclusion; categories never compete with one another in this call.
+include-or-exclude decision.
 
-The analytic categories are diagnostic tools. The final finding is the underlying
-doctrine they reveal: a premise the user's article treats as settled, the boundary of
-legitimate debate that follows from it, and (when supported) the interest structurally
-served by that boundary. Do not make the category pattern itself the main conclusion.
+Apply the supplied category-specific guide when writing the paragraph.
 
-Make the category detail concrete before explaining its wider implications. The reader
-must be able to identify exactly who or what the finding concerns. Connect the specific
-category finding to the assumption it reveals; do not replace it with a generic claim
-about what your article takes for granted that could appear under any category.
-
-For the supplied category, answer these questions explicitly in the paragraph:
-- worthy_unworthy_victims: Name the people or groups whose suffering receives greater
-  concern and those whose suffering receives less concern. Identify the actual harm or
-  risk for each, and explain which gets sympathy, detail, urgency, or accountability.
-  State this unequal treatment in the opening claim. "Worthy" and "unworthy" describe
-  the weight the coverage gives their suffering, not their actual moral worth. Do not
-  call someone a victim without identifying a supported harm, or invent a second group
-  merely to fill the category.
-- agency_attribution: Name who is presented as doing what to whom. Identify whose action
-  or responsibility is made explicit and whose is softened, obscured, or justified.
-  State that attribution in the opening claim, then show the verbs, passive wording,
-  missing agent, or stated justification that supports it. Distinguish responsibility
-  assigned by the article from independently established responsibility; do not invent
-  an unnamed actor or assume passive grammar alone proves an ideological pattern.
-- presuppositions_doctrine: State the exact proposition your article treats as true
-  without arguing for it. Name the actor, institution, action, or policy it concerns.
-  Explain what that assumption makes seem legitimate, necessary, or beyond questioning.
-  Show the labels, claims absorbed into narration, or other details that establish it,
-  and how the comparison exposes it. A topic or attitude such as "security matters"
-  is too vague unless the paragraph specifies whose security and what it permits.
-- selective_criteria: Name the actual standard used to judge a named actor, action,
-  or policy, and the relevant standard given less weight or applied differently.
-  Specify what counts as success, failure, legitimacy, or acceptable cost in each
-  article. State the unequal or narrowed test in the opening claim and support it
-  with concrete judgments from the texts. Do not claim a double standard unless the
-  actors or actions are sufficiently comparable; a hypothetical role reversal alone
-  is not evidence.
-- suppressed_alternative: Name the explanation or policy choice your article makes
-  available and the specific rival account or option it leaves unexplored. Identify
-  the actors and consequences involved, and show which comparison details make the
-  alternative plausible. Do not merely say "other perspectives are missing."
-- smoke_and_discrepancies: Identify the specific speculation or peripheral detail
-  that displaces a substantive question, or the exact disputed claim in the texts.
-  For a discrepancy, state who reports what about the same event and distinguish
-  an actual conflict from differences in timing or scope. Do not decide which is true
-  without evidence or label uncertainty itself as smoke.
-
-Include only category-specific findings supported by the supplied pair evidence.
-Keep unsupported details out; use the existing exclude decision if the category's
-central finding cannot be stated concretely and defended.
+Background knowledge cannot substitute for an observed difference between the articles..
 
 - Set "include" to true only if one or more comparison articles show a meaningful,
   text-supported difference that warrants a doctrinal inference, grounded in the paired
@@ -827,19 +851,18 @@ central finding cannot be stated concretely and defended.
   actually about a contrast with your article. Also exclude it when you can describe only
   a surface difference and cannot defend an underlying premise.
 - When included, write exactly one concise paragraph.
-- The first sentence must state the exact interpretation of your article as a complete,
-  standalone claim in plain language, naming the relevant people, actors, assumption,
-  or evaluative standard for this category. Explain what it takes for granted and
-  what important question that leaves unexamined. Put supporting quotes and article details in the
-  following sentences, explaining how they support that opening claim. Do not make
-  readers work through an article recap to discover the interpretation.
-- The paragraph is for a reader with no background in media theory. Do not use academic or
-  system vocabulary such as "presupposition," "doctrine," "doctrinal floor," "legitimate
-  debate," "framing," "agency attribution," "selective criteria," "structural interest,"
-  or category names. Translate the analysis into ordinary language. For example, write
-  "your article takes for granted that..." or "this leaves little room to ask whether...".
-- Every main interpretive claim must be followed by at least one concrete example from the
-  supplied articles. Name the actor, action, consequence, quoted phrase, or omitted question
+- The first sentence MUST directly and explicitly answer the supplied category's
+  question, following its category-specific guide. A reader who sees only that sentence
+  must know the answer, including the relevant names, actions, harms, idea, standards,
+  alternatives, or conflicting claims. Do not open with a general observation, an
+  abstract interpretation, or a restatement of the question. Do not make readers infer
+  the answer from later examples. Keep the answer in plain language; then use the
+  remaining sentences for evidence, the underlying assumption, why the difference may
+  exist, and what it leaves unexamined.
+- Every main claim about how the articles present the story must be supported by at least
+  one concrete example from the supplied articles. Background explanations may draw on
+  your wider knowledge; identify them as context or possible causes, not article evidence.
+  Name the actor, action, consequence, quoted phrase, or omitted question
   that supports the claim. Do not use vague support such as "its language," "the coverage,"
   or "different priorities" without showing what the language or priority actually was.
 - Include evidence from both sides of the comparison: one specific example from your article
@@ -856,9 +879,8 @@ central finding cannot be stated concretely and defended.
   in your article that the rival coverage makes visible.
 - Refer to the source article as "your article" in every paragraph. Do not write
   "the source article", "base article", or "original article" in reader-facing text.
-- Write for an average reader: short sentences, plain words, and direct explanation.
-- Keep each paragraph clear and concise, ideally 4 to 6 sentences so there is room for the
-  claim and its concrete examples.
+- Aim for 5 to 7 short sentences per paragraph, roughly 100 to 150 words. Use more room
+  when needed to preserve distinct evidence, counterexamples, or important qualifications.
 - Base the paragraph on the source_article analysis, comparison_article analysis,
   difference, underlying_presupposition, doctrinal_boundary, comparison_revelation,
   interest_alignment, inference_strength, source_basis, and comparison_basis fields.
@@ -866,23 +888,15 @@ central finding cannot be stated concretely and defended.
   outlet domain. For example, write "articles from Oman and Iran", not
   "articles from omanobserver.om and iranherald.com".
 - Put the exact articles used in the supporting_articles list.
-- Use structural language only. Do not attribute intent to journalists or outlets.
-- Calibrate the wording to the evidence. Prefer "rests on," "treats as given," or
-  "makes visible" to claims about what an entire nation, outlet, or journalist believes.
-- Identify settled institutional or political assumptions when the paired evidence
-  supports them. Explain how your article expresses that broader doctrine and distinguish
-  its operation in the supplied coverage from its prevalence across an institution.
-  Do not force an institutional inference when the evidence supports only a narrower premise.
-- Do not stop at formulations such as "your article focuses on X while coverage from Y
-  emphasizes Z." Such statements may supply evidence, but they are not a finding.
-- Do not rank articles. Do not score anything. Do not produce an overall synthesis or
-  discuss any category other than the supplied category.
 
 Before returning, check each paragraph: could a reader understand it without knowing media
-theory, and can the reader point to the exact article details that justify its main claim?
+theory, and can the reader distinguish the article evidence for its main finding from
+the background knowledge used to explain it?
 If either answer is no, rewrite it in plainer and more concrete terms.
-Also check that the first sentence states the interpretation and the rest of the
-paragraph supports it, rather than introducing the main interpretation at the end.
+Read only the first sentence: does it explicitly answer this category's question,
+with the specifics required by its guide? If the reader must guess or read further
+to find that answer, rewrite the opening. The rest of the paragraph must support
+and explain that answer.
 Could the reader name the affected groups, actor-action relationship, assumed proposition,
 or evaluative standards relevant to this category? If not, rewrite the finding with
 those specifics. If the evidence cannot supply them, exclude the category.
@@ -892,7 +906,7 @@ and give a short exclusion_reason. Return ONLY valid JSON, no markdown fences:
 {
   "include": true,
   "doctrinal_claim": "<one sentence naming the tacit premise in your article>",
-  "paragraph": "<one doctrine-first paragraph explaining the premise, its boundary, and the comparative evidence>",
+  "paragraph": "<one paragraph whose first sentence explicitly answers the category question, followed by evidence and explanation of the assumption and its consequences>",
   "examples": [
     "<specific example from your article and why it supports the claim>",
     "<specific example from a comparison article and why it exposes the taken-for-granted idea>"
@@ -902,84 +916,68 @@ and give a short exclusion_reason. Return ONLY valid JSON, no markdown fences:
   ],
   "exclusion_reason": ""
 }
-""" + BLUF_OUTPUT_GUIDANCE
+""" + COUNTRY_CONTEXT_GUIDANCE + READER_OUTPUT_GUIDANCE
 
 OVERALL_SUMMARY_SYSTEM = """
-You are writing the final concise summary for ClearFrame.
+You write ClearFrame's overall synthesis of what the category analysis reveals beneath
+news coverage, using Herman and Chomsky's propaganda-model approach.
 
-You receive doctrine-centered category findings inferred from differences between your
-article and comparison articles. Combine them into one concise, reader-facing diagnosis
-of the deepest well-supported presupposition in your article. Your task is to explain
-what goes unsaid: the assumptions left unstated, questions left unasked, and plausible
-explanations or policy choices left unexplored. Do not summarize the articles or retell
-the events. Use article details only to show why the inferred gap matters.
+The pipeline has already compared the articles, identified observable differences, and
+inferred the assumptions those differences expose. You receive all included category
+findings, including doctrinal_claim, explanatory paragraphs, and supporting evidence.
+Your task is to connect those analytic findings into one accessible narrative about
+what readers are encouraged to accept, whose interests and costs count, and which
+questions or alternatives receive little room. Summarize the analysis, not the articles.
 
-You also receive a numbered article_references list. Use its citation_id values to cite
-the exact articles supporting each conclusion, including your article.
+Analytic purpose:
+- Explain what must be taken for granted for those choices to seem natural, and how
+  that premise narrows the judgments or possible solutions readers are offered.
+- Begin with the broad, supported assumption or tension exposed across the findings.
+  Make the opening concrete about the actors, authority, harms, or choices involved.
+  Do not open with "the coverage offers different perspectives" or an event recap.
+- Connect related category findings into a coherent explanation of how those assumptions
+  work together. Do not march through categories or repeat their individual talking points.
+  Do not force every finding into one assumption if the analysis supports distinct ones.
+- Use the range of supported viewpoints to expose assumptions that would be harder to
+  see in isolation. Explain how a competing premise changes who must justify an action,
+  what counts as an acceptable cost, or which choices seem available. Include meaningful
+  disagreements among comparison viewpoints; do not cherry-pick a convenient opponent
+  or flatten all other coverage into a single alternative.
+- Distinguish shared assumptions from competing assumptions. Coverage can disagree on
+  tactics while accepting the same authority or goals, but infer that shared premise
+  only when the category findings support it. Do not manufacture a hidden consensus.
 
-Rules:
-- Write 4 to 6 short sentences.
-- Make the first sentence a short, standalone statement of your exact interpretation:
-  the assumption your article takes for granted and the question it leaves unexamined.
-  Include its required citations, then use the remaining sentences to support it with
-  article details and explain why those details justify the interpretation. Do not
-  bury the conclusion in a long opening sentence containing quotes or an event recap,
-  and do not introduce the main interpretation only in the final sentence.
-- Refer to the source article as "your article". Do not write "the source article",
-  "base article", or "original article".
-- Write for an average reader: clear, plain, direct language.
-- Do not use academic or system vocabulary such as "presupposition," "doctrine,"
-  "doctrinal floor," "legitimate debate," "framing," "agency attribution," "selective
-  criteria," "structural interest," or category names. Express the same idea with ordinary
-  phrases such as "takes for granted," "starts from the idea that," "treats as the main
-  question," and "gives little attention to."
-- Lead with what your article takes for granted. Explain what important question this leaves
-  mostly unexamined and how the comparison makes that gap visible. Distinguish an unstated
-  assumption from a missing fact: an omission matters here when it narrows the explanations,
-  judgments, or choices readers are invited to consider. Do not force a claim about what
-  is missing when the category findings do not support it.
-  Do not call an absent question "non-debatable," "forbidden," or
-  "suppressed" unless the supplied text explicitly rejects it.
-- Support every main claim with a concrete example. Include at least one specific example
-  from your article and one from comparison coverage. An example should name an actor,
-  action, consequence, phrase, or question—not merely say that the articles have different
-  emphases. Explain how each example supports the larger conclusion.
-- Put the claim and evidence next to each other. Do not make the reader open the category
-  details or references to understand why the summary reached its conclusion.
-- Prefer one underlying doctrine supported across categories over a list of category-level
-  differences. Add a second doctrine only if it is distinct and comparably well supported.
-- If the articles disagree within a shared frame, name the shared doctrinal floor and the
-  stronger interpretation it excludes. If they embody rival frames, identify the premise
-  in your article that becomes visible only through that contrast.
-- A summary that merely says your article "focuses on" or "emphasizes" one issue while
-  other countries focus on another has failed. Differences in attention, victim worth,
-  agency, criteria, or alternatives are evidence for the doctrine, not the conclusion.
-- When referring to comparison coverage, use country names from source_country, not
-  outlet domains or URLs. For example, write "coverage from Oman and Iran", not
-  "coverage from omanobserver.om and iranherald.com".
-- Place numbered citations such as [1] or [1][2] at the end of each sentence making a
-  factual or interpretive claim. Cite your article for claims about its assumptions or
-  omissions, and cite the specific comparison article when its evidence makes them visible.
-  A separate reference list without citations beside the claims is insufficient.
-- Use only citation_id values from article_references. Never invent a source or citation,
-  cite an article merely because it was retrieved, or cite a country's coverage as a whole
-  when the evidence comes from one article. The application builds the reference list from
-  the citations you use; do not return article metadata or URLs.
-- Use structural language only. Do not attribute intent to journalists or outlets.
-- Preserve supported inferences about settled institutional or political assumptions
-  from the category findings. Distinguish how your article expresses such an assumption
-  from claims about its prevalence or uniform acceptance across an outlet or country;
-  the latter require broader evidence. Do not force a broader inference when unsupported.
-- Do not introduce facts or doctrinal claims not present in the category findings.
-- Do not list categories or write bullets.
+Keep the narrative at the level of interpretation:
+- Do not recount the event, summarize what each article says, catalog factual disputes,
+  repeat quotations, or walk through examples.
+  Include only enough concrete context to identify the assumption and its consequences.
+- Do not organize sentences as "your article reports X; coverage from A says Y; coverage
+  from B adds Z." Organize them around what the comparison reveals about authority,
+  responsibility, acceptable costs, or the limits of the explanations offered.
+- A statement such as "one article emphasizes security while another emphasizes harm"
+  is only an observation. The synthesis must explain the supported assumption behind
+  that difference and what it makes easier to accept or harder to question.
 
-Before returning, check the summary: remove any unexplained academic term, and make sure
-each broad conclusion is accompanied by a specific example that lets the reader see how you
-reached it. Check that the paragraph explains what goes unsaid rather than summarizing
-the articles, and that each claim has citations to the exact articles used to support it.
+Length, language, and accuracy:
+- Write exactly one connected paragraph, aiming for 200 to 250 words. Use less when the
+  findings do not support that length. Do not pad with background, repetition, or recap.
+- Refer to the user's source as "your article". Identify comparison viewpoints by their
+  underlying assumptions; use country names to distinguish them.
+- Use all included findings to assess the meaningful range of interpretations. Group
+  overlapping findings, retain important tensions, and preserve uncertainty and
+  counterexamples that limit the conclusion. Breadth does not require equal space for
+  every article or treating every claim as equally credible.
+- Do not include citations, reference markers, URLs, headings, bullets, or article rankings.
+
+Before returning, check: does the paragraph explain the assumptions and boundaries
+revealed by comparing the coverage, or merely describe what the articles discuss?
+If it could be written from a list of article summaries without the category analysis,
+rewrite it. Each main sentence should advance an interpretation or explain its
+consequences, rather than add another reported detail. Check that multiple supported
+viewpoints inform the synthesis without turning it into an article-by-article survey.
 
 Return ONLY valid JSON, no markdown fences:
 {
-  "summary": "<concise diagnosis of what goes unsaid, with numbered citations beside the claims>"
+  "summary": "<one plain-language narrative connecting the assumptions and limits exposed by the category findings>"
 }
-""" + BLUF_OUTPUT_GUIDANCE
+""" + COUNTRY_CONTEXT_GUIDANCE + READER_OUTPUT_GUIDANCE

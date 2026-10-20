@@ -11,12 +11,12 @@ const copyResultsBtn = $("#copyResults");
 let running = false, rawLog = "", latestResults = null;
 
 const CATEGORY_DESCRIPTIONS = {
-  worthy_unworthy_victims: "Whose suffering gets attention and sympathy, and whose receives less concern.",
-  agency_attribution: "Who is shown as doing what to whom, and whose responsibility is made clear or softened.",
-  presuppositions_doctrine: "Which political or institutional assumptions the article treats as given rather than questions to debate.",
-  selective_criteria: "Which standards are used to judge actors and actions, and which are downplayed or applied differently.",
-  suppressed_alternative: "Which plausible explanations or policy choices the article leaves unexplored or dismisses.",
-  smoke_and_discrepancies: "Where speculation or side issues obscure substantive questions, and where the articles' factual claims differ.",
+  worthy_unworthy_victims: "Whose harm gets explained, and whose gets less attention.",
+  agency_attribution: "Who the article blames, excuses, or leaves unnamed.",
+  presuppositions_doctrine: "Ideas the article accepts without examining them.",
+  selective_criteria: "What counts as success or failure, and whether the same rules apply to everyone.",
+  suppressed_alternative: "Possible causes or ways forward that the article does not explore.",
+  smoke_and_discrepancies: "Side issues that draw attention away from important questions, or facts the articles disagree on.",
 };
 
 // Restore a remembered key from this browser (opt-in only).
@@ -56,13 +56,14 @@ function referenceText(article){
 
 function summaryAsHtml(summary, references){
   const byId = new Map(references.map(article => [String(article.citation_id), article]));
-  return textAsHtml(summary).replace(/\[(\d+)\]/g, (marker, number) => {
+  const linkedText = textAsHtml(summary).replace(/\[(\d+)\]/g, (marker, number) => {
     const article = byId.get(number);
     const url = article ? safeHttpUrl(article.url || "") : "";
     return url
       ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + marker + '</a>'
       : marker;
   });
+  return '<p>' + linkedText.replace(/(?:<br>\s*){2,}/g, '</p><p>') + '</p>';
 }
 
 function groupArticlesByCountry(articles){
@@ -81,7 +82,7 @@ function addGroupedArticlesHtml(parts, articles){
     countryArticles.forEach(article => {
       const title = escapeHtml(article.title || "Untitled");
       const outlet = escapeHtml(article.outlet || "");
-      const sourceTag = article.role === "source" ? "[Source] " : "";
+      const sourceTag = article.role === "source" ? "[Your article] " : "";
       const url = safeHttpUrl(article.url || "");
       const linkedTitle = url
         ? '<a href="' + escapeAttribute(url) + '">' + title + "</a>"
@@ -101,10 +102,10 @@ function resultsAsPlainText(data){
     const refs = data.summary_supporting_articles || [];
     if (refs.length) lines.push("", "References", ...refs.map(referenceText));
   }
-  if (data.structural_note) lines.push("", "Structural note", data.structural_note);
+  if (data.structural_note) lines.push("", "About this comparison", data.structural_note);
   const categories = data.categories || [];
-  if (categories.length) lines.push("", "Category Details");
-  else lines.push("", "No meaningful category-level differences surfaced for this story.");
+  if (categories.length) lines.push("", "Findings explained");
+  else lines.push("", "The comparison did not find clear evidence of an important difference in how these articles explain the story.");
   categories.forEach(category => {
     lines.push("", category.label || category.key || "Category");
     const description = CATEGORY_DESCRIPTIONS[category.key];
@@ -115,7 +116,7 @@ function resultsAsPlainText(data){
   });
   const analysisArticles = data.analysis_articles || [];
   if (analysisArticles.length){
-    lines.push("", "Articles Used in This Analysis");
+    lines.push("", "Articles compared");
     groupArticlesByCountry(analysisArticles).forEach((countryArticles, country) => {
       lines.push("", country, ...countryArticles.map(referenceText));
     });
@@ -145,15 +146,15 @@ function resultsAsHtml(data){
     parts.push("<h2>Analysis stopped</h2><p>" + textAsHtml(data.stop_reason) + "</p>");
   }
   if (data.summary){
-    parts.push("<h2>Summary</h2><p>" + summaryAsHtml(data.summary, data.summary_supporting_articles || []) + "</p>");
+    parts.push("<h2>Summary</h2>" + summaryAsHtml(data.summary, data.summary_supporting_articles || []));
     addReferencesHtml(parts, data.summary_supporting_articles || []);
   }
   if (data.structural_note){
-    parts.push("<h2>Structural note</h2><p><em>" + textAsHtml(data.structural_note) + "</em></p>");
+    parts.push("<h2>About this comparison</h2><p><em>" + textAsHtml(data.structural_note) + "</em></p>");
   }
   const categories = data.categories || [];
-  if (categories.length) parts.push("<h2>Category Details</h2>");
-  else parts.push("<p>No meaningful category-level differences surfaced for this story.</p>");
+  if (categories.length) parts.push("<h2>Findings explained</h2>");
+  else parts.push("<p>The comparison did not find clear evidence of an important difference in how these articles explain the story.</p>");
   categories.forEach(category => {
     parts.push("<h3>" + escapeHtml(category.label || category.key || "Category") + "</h3>");
     const description = CATEGORY_DESCRIPTIONS[category.key];
@@ -163,7 +164,7 @@ function resultsAsHtml(data){
   });
   const analysisArticles = data.analysis_articles || [];
   if (analysisArticles.length){
-    parts.push("<h2>Articles Used in This Analysis</h2>");
+    parts.push("<h2>Articles compared</h2>");
     addGroupedArticlesHtml(parts, analysisArticles);
   }
   parts.push("</div>");
@@ -250,9 +251,9 @@ function renderResults(data){
     html += '<div class="note">' + escapeHtml(data.structural_note) + '</div>';
   }
   if (!cats.length){
-    html += '<div class="empty">No meaningful category-level differences surfaced for this story.</div>';
+    html += '<div class="empty">The comparison did not find clear evidence of an important difference in how these articles explain the story.</div>';
   } else {
-    html += '<details class="category-details"><summary>Category Details</summary><div class="details-body">';
+    html += '<details class="category-details"><summary>Findings explained</summary><div class="details-body">';
     cats.forEach(c => {
       const refs = c.supporting_articles || [];
       const description = CATEGORY_DESCRIPTIONS[c.key];
@@ -279,8 +280,8 @@ function renderResults(data){
   }
   const analysisArticles = data.analysis_articles || [];
   if (analysisArticles.length){
-    html += '<section class="used-articles"><h3>Articles Used in This Analysis</h3>' +
-      '<div class="meta">The source article and every comparison article sent to pair analysis.</div>';
+    html += '<section class="used-articles"><h3>Articles compared</h3>' +
+      '<div class="meta">Your article and the other articles compared with it.</div>';
     groupArticlesByCountry(analysisArticles).forEach((countryArticles, country) => {
       html += '<div class="country-group"><h4>' + escapeHtml(country) + '</h4><ul>';
       countryArticles.forEach(article => {
@@ -288,7 +289,7 @@ function renderResults(data){
         const outlet = article.outlet || "";
         const url = safeHttpUrl(article.url || "");
         const sourceTag = article.role === "source"
-          ? '<span class="article-role">Source</span>' : '';
+          ? '<span class="article-role">Your article</span>' : '';
         html += '<li>' + sourceTag +
           (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
           (outlet ? ' <span class="meta">(' + escapeHtml(outlet) + ')</span>' : '') + '</li>';
@@ -368,7 +369,7 @@ function textAsHtml(s){
 // Dispatch a single decoded SSE event to the right renderer.
 function handleMsg(msg){
   if (msg.type === "line") appendLine(msg.text);
-  else if (msg.type === "result"){ renderResults(msg.data); renderAnalysis(msg.data); setStatus("ok", "Done. See Results and LLM Analysis."); }
+  else if (msg.type === "result"){ renderResults(msg.data); renderAnalysis(msg.data); showTab("results"); setStatus("ok", "Done. Your results are ready."); }
   else if (msg.type === "error"){ appendLine("ERROR: " + msg.text); setStatus("err", "Failed: " + msg.text); }
   else if (msg.type === "done"){
     if (dot.className.indexOf("err") === -1 && dot.className.indexOf("ok") === -1) setStatus("ok", "Finished.");

@@ -76,7 +76,10 @@ click **Run pipeline**.
 - **Results tab** â€” the selected comparison articles and the synthesis, rendered
   as clean cards. Good for validation and for non-technical readers. After each
   successful run, the same content is written to `results.json`, replacing the
-  previous run's file. Use **Copy for Google Docs** to copy the complete result
+  previous run's file. Each completed run also regenerates `results-preview.html`,
+  a standalone reading copy that opens directly in a browser. Its print layout is
+  suitable for saving as PDF. Command-line runs regenerate the same HTML file.
+  Use **Copy for Google Docs** to copy the complete result
   with headings, paragraphs, and linked references preserved.
 
 Press **Ctrl+C** in the terminal to stop the server.

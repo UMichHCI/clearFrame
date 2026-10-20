@@ -49,7 +49,7 @@ from clearframe.prompts import (
 from clearframe.stage7_chomsky import chomsky_pair_analysis, extract_source_article_analysis
 from clearframe.stage9_synthesis import synthesize_category_paragraphs
 
-PAIR_ANALYSIS_MAX_WORKERS = 6
+PAIR_ANALYSIS_MAX_WORKERS = 12
 
 
 def run_clearframe_pipeline(
@@ -413,5 +413,8 @@ if __name__ == "__main__":
     # SOURCE_URL = "https://apnews.com/article/iran-war-khamenei-politics-religion-society-a9e0405878db8266e1965d7c0b396243"
     SOURCE_URL = "https://apnews.com/article/ukraine-russia-war-kyiv-strikes-july-2026-83bcba8bb972ce248a805bc576a7322c"
     output = run_clearframe_pipeline(source_url=SOURCE_URL)
+    from clearframe.report import write_results_html
+
+    write_results_html(output)
 
 

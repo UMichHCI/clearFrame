@@ -26,6 +26,6 @@ DEBUG_DUMP_DIR = "debug_runs"   # timestamped per-run JSON dumps, for prompt ite
 # Shown verbatim with every set of results. The propaganda model is structural;
 # this line exists so no reader can take the findings as claims about intent.
 STRUCTURAL_NOTE = (
-    "These patterns reflect how news systems are structured â€” outlet position, "
-    "audience, and sourcing â€” not the intent of individual journalists."
+    "News coverage can be shaped by an outlet's position, its audience, and the sources "
+    "it relies on. These comparisons do not tell us what individual journalists intended."
 )
