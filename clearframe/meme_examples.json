@@ -1,0 +1,68 @@
+{
+  "purpose": "Fictional style examples only. Learn their dialogue, specificity, and joke mechanics. Never import their facts, subjects, or captions into the real analysis.",
+  "examples": [
+    {
+      "finding": "A city newsletter praises the new stadium's VIP lounge but barely mentions that school bus routes were cut to help fund it.",
+      "template_id": "drake",
+      "captions": {"rejected": "Can kids still get to school?", "preferred": "But have you seen the VIP lounge?"},
+      "sentence": "The newsletter celebrates stadium perks while giving school bus cuts little attention.",
+      "why_it_works": "Two concrete questions reveal the misplaced priority through a recognizable voice, rather than labeling one issue more developed."
+    },
+    {
+      "finding": "After a parking app outage, the vendor blames the city's Wi-Fi while city officials blame the vendor's update. Neither account settles the cause.",
+      "template_id": "spiderman",
+      "captions": {"left_actor": "App company", "left": "Your Wi-Fi did it.", "right_actor": "City hall", "right": "Your update did it."},
+      "sentence": "Each side explains the outage by pointing at the other.",
+      "why_it_works": "The characters have clear identities and parallel accusations. The meme illustrates competing blame without deciding who is right."
+    },
+    {
+      "finding": "A school technology report assumes buying newer tablets will improve lessons, giving little consideration to teaching methods.",
+      "template_id": "simpsons",
+      "captions": {"question": "Could the problem be how we're teaching?", "dismissal": "No. We need shinier tablets."},
+      "sentence": "The report questions the equipment more readily than the teaching approach.",
+      "why_it_works": "The second line dodges the first question and returns to the assumption. It is a reversal, not two report headings."
+    },
+    {
+      "finding": "A company newsletter describes workers' request to know next week's shifts in advance as a demand for extra perks.",
+      "template_id": "butterfly",
+      "captions": {"observer": "The company newsletter", "reality": "Knowing next week's shifts", "question": "Is this a luxury benefit?"},
+      "sentence": "The newsletter presents predictable work hours as an extra perk.",
+      "why_it_works": "The question mislabels a concrete request. It does not just paraphrase the label above the butterfly."
+    },
+    {
+      "finding": "Coverage of falling library attendance quotes suggestions for new branding and more advertising, but gives little space to closing hours that exclude working readers.",
+      "template_id": "office",
+      "captions": {"prompt": "How do we bring readers back?", "first": "A new logo!", "second": "More posters!", "alternative": "Maybe stay open after people finish work?"},
+      "sentence": "Publicity gets attention while inconvenient opening hours go largely unquestioned.",
+      "why_it_works": "The first answers share the accepted premise. The last offers a concrete alternative, and the final panel supplies its comic rejection."
+    },
+    {
+      "finding": "A delivery service's explanation of abandoned carts discusses customers' shopping habits but omits its recent doubling of the minimum order.",
+      "template_id": "snl",
+      "captions": {"action": "Double the minimum order", "reaction": "Why are customers abandoning their carts?"},
+      "sentence": "The service's explanation leaves out its own change to order rules.",
+      "why_it_works": "An action visibly precedes surprise about its possible consequence. The joke names the omitted contribution without claiming a proven sole cause."
+    },
+    {
+      "finding": "A grocery chain's newsletter calls its own membership fee a shopper benefit and an equivalent rival fee a charge just to enter.",
+      "template_id": "pam",
+      "captions": {"first": "Our store's membership fee", "second": "The rival's membership fee", "conclusion": "Both charge you to enter."},
+      "sentence": "Similar fees get friendlier wording when this store charges them.",
+      "why_it_works": "The punchline identifies the specific shared feature. It does not need to claim the two stores are identical in every respect."
+    },
+    {
+      "finding": "A company article treats longer commutes as employees' personal travel choices, barely considering its relocation away from the train station.",
+      "template_id": "goose",
+      "captions": {"question": "Why move the office away from the train?", "avoiding": "The company's commute tips"},
+      "sentence": "The explanation focuses on workers' travel choices while overlooking the office move.",
+      "why_it_works": "A specific question chases a recognizable account that leaves it unanswered. The fleeing label names the account, not a vague topic."
+    },
+    {
+      "finding": "A local article repeats the mayor's promises to keep the pool free and pay for all repairs solely through pool entry fees without examining the conflict.",
+      "template_id": "choice",
+      "captions": {"first": "Keep the pool free", "second": "Fund repairs with entry fees", "chooser": "The mayor who promised both"},
+      "sentence": "The coverage repeats two promises without asking how both can be kept.",
+      "why_it_works": "The named chooser faces genuinely incompatible promises. Two reasonable questions that could both be asked would not create this dilemma."
+    }
+  ]
+}

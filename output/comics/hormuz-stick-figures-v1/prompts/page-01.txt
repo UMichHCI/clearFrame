@@ -1,0 +1,32 @@
+Use case: illustration-story. Create ONE finished page of a SIX-PAGE continuous stick-figure explanatory comic based on ClearFrame's local results-preview.html report "Can the U.S. and Iran take the off-ramp?"
+ART DIRECTION IS STRICT: genuine STICK FIGURES ONLY. Circular heads, two dot eyes, simple mouths, single black lines for torsos/arms/legs. No realistic people, no detailed anatomy, no filled human silhouettes, no elaborate clothes. Tiny simple badges identify recurring characters. Mostly black ink on warm white paper, clean flat muted accent colors on badges and props only. Expressive stick-figure gestures, visual metaphors, clear storytelling. This should read like an accessible hand-drawn explainer comic, not a government infographic or an academic poster. No caricatures or ethnic stereotypes, no graphic violence, no new real-world events.
+CONTINUITY: one recurring curious READER stick figure with simple round glasses and a small book appears throughout. U.S. badge blue; Iran badge green; Israel badge gold; Oman badge purple; Saudi Arabia badge rust. Trump is a stick figure with a tiny red tie and a name badge, no realistic face. Michael Singh has square glasses and badge "Singh". Congress is a small group with a sign "Congress". Publications appear as labeled papers or screens, not as government spokespeople. Ships are simple line drawings with rectangular hulls. No real-world meeting is implied by the explanatory stage on which viewpoints converse.
+LAYOUT: portrait comic page, large title and page number, SIX panels in a clearly numbered 2-column by 3-row grid, read left-to-right then downward. Give every panel ample space for artwork and very legible text. Concrete action and visual continuity, not six blocks of prose. Place the exact caption and dialogue provided for each panel in clean narration boxes and speech balloons. Clearly attach balloons to their specified speakers. All text supplied below must be spelled correctly and readable. Do not add other claims, random labels or extra dialogue.
+SOURCE RULES: all dialogue is analytical paraphrase, not authenticated quotations. Use only the supplied findings. No invented deal, military outcome, endorsement, or consensus. Distinguish U.S./Israeli governments from Israeli publications; distinguish Iran's state broadcaster from all Iranian opinion. Acknowledgment that U.S. and Israel began the war must not be omitted. A reported legal objection is not a legal ruling. Inferences about Iranian leaders' motives must be attributed to Singh's explanation, not displayed as access to their actual thoughts. Uncertainty and meaningful qualifications matter.
+On every page include the small, readable footer exactly: "Based on the ClearFrame report. Dialogue is reconstructed, not quoted."
+PAGE TITLE: "WHO IS CAUSING THE CRISIS?"
+Page number: "1 / 6"
+
+Panel 1: Establish the narrative. READER holds a news story beside a simplified sea lane and waiting tanker.
+Caption: "A reader follows one question through the report."
+READER balloon: "What would end the Hormuz crisis?"
+
+Panel 2: A clearly marked brief recap on a paper held by the READER. U.S. and Israel stick figures stand beside the paper, not fighting. This is the source article's acknowledged background.
+Caption: "The NPR article acknowledges that the U.S. and Israel began the war."
+READER: "So the story does not begin with shipping restrictions."
+
+Panel 3: The READER examines an NPR paper while a U.S. policy-frame stick figure points to a tanker and a small negotiating table.
+Caption: "NPR frames renewed U.S. strikes as protection and bargaining pressure."
+U.S. figure: "Our pressure could bring Iran back to talks."
+
+Panel 4: An Iranian commander stick figure beside a screen labeled "Press TV" points to a U.S. naval ship and a blockade symbol beside the SAME tanker.
+Caption: "Iran's state broadcaster reverses the explanation."
+Iranian commander: "American military pressure and the blockade make shipping less secure."
+
+Panel 5: Draw the same tanker centered between two small directional explanations as the READER compares the papers. The claims remain attributed.
+Labels: "U.S. policy frame: pressure could help" and "Press TV frame: pressure creates insecurity"
+READER: "They disagree about what causes the problem and what counts as a response."
+
+Panel 6: READER follows the U.S. policy-frame figure toward an open door marked "Negotiations". The waiting tanker remains visible in a small window.
+Caption: "A practical promise invites the next question."
+READER: "If force might work, is that enough?"

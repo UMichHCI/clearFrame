@@ -80,8 +80,71 @@ click **Compare articles**.
   The sidebar starts a new comparison without leaving the website. Results update
   automatically when a run completes. Both <http://localhost:8000> and
   <http://localhost:8000/results> open the same integrated workspace.
-  Use **Copy for Google Docs** to copy the complete result with linked references,
-  or **Print / PDF** to print the reading view without the app controls.
+  The overall summary and each difference have independent **High fidelity** and
+  **Low fidelity** tabs. High fidelity shows the full explanation and references;
+  low fidelity shows that section's meme and one short sentence. You can mix the
+  two views across sections. Switching tabs makes no model calls.
+  The summary's **Comic** tab, immediately after **Middle fidelity**, displays
+  the saved six-page Hormuz stick-figure comic as an example. It includes page
+  navigation, full-size images, and expandable transcripts. Its images load only
+  when the Comic tab is opened; it makes no model calls and does not generate a
+  different comic for each comparison.
+  The overall summary also has a **Middle fidelity** tab: an interactive map of
+  coverage grouped by source country. Each country represented in the articles,
+  including the original article's country, gets a marker. It summarizes that
+  country's answer to one focused shared question, based on its sampled coverage,
+  and notes differences between its outlets when relevant. The country names and
+  marker count come from the article metadata. Comparisons appear on lines connecting
+  countries in the world map: solid green lines indicate similar answers and dashed
+  brown lines indicate different answers. Hover or keyboard-focus a line to see
+  the country pair, comparison title, and explanation; click or tap to keep it open
+  with sources. **Browse country comparisons** offers the same comparisons without
+  needing to target a line. The world map is the only section in this view.
+  Each country uses a complete, plain-language answer in first person (we/our)
+  from the country's underlying worldview represented in the analysis as its bold
+  headline. It voices the position itself rather than speaking as a reporter.
+  Supporting explanations retain neutral source attribution and distinguish
+  explicit positions from interpretation. The explanation and sources stay hidden
+  until selected. Select a country to open its answer and highlight its map
+  connections; select it again or use Close answer to dismiss it.
+  **Answers around the world** places the answers on
+  a locally bundled world map. Hover or keyboard-focus a marker to preview its
+  answer; click or tap to keep its explanation and sources open. Nearby markers
+  spread apart with lines back to their geographic locations. Drag to pan and
+  use the zoom, World, or Fit countries controls. Country buttons provide an
+  alternative to selecting markers, including when a location is unavailable.
+  The map uses [Natural Earth](https://www.naturalearthdata.com/) geography and
+  makes no additional model calls or external map-service requests.
+  New comparisons request this map in its own single model call, independently
+  of the meme request. Uploaded results without a map offer **Generate map**;
+  opening a file or switching views does not generate one automatically.
+  **Save results** includes the map so it can be reopened without another call.
+  **Regenerate map** requests a replacement using your OpenAI account.
+  `PERSPECTIVE_MODEL` optionally overrides the map model; it defaults to the
+  configured full analysis model. No extra review, validation, or retry stage is
+  used for map generation.
+  New web
+  comparisons generate captions in the background after the
+  full results appear. The model receives analysis text and descriptions of the
+  nine bundled templates; the browser draws captions over the local images.
+  A single model request writes the memes and checks their fit and clarity before
+  returning one final card per summary. Fictional examples from
+  unrelated topics teach dialogue and joke structure. New explanatory sentences
+  use at most 20 words. Expanded templates support speaker labels, longer
+  conversational captions, and a tailored conclusion for the Pam template.
+  Uploaded files without memes offer **Generate memes**, using the key in the
+  sidebar. Opening a file stays local; making memes sends its summary text and
+  supporting references to OpenAI and bills your account.
+  **Save results** downloads a JSON file with any generated captions included.
+  Reopening that file restores the saved views without another model call. Click a
+  meme to show that section's high fidelity explanation. Failed meme generation can be retried and
+  leaves the full report available. **Regenerate memes** makes a fresh set for
+  existing results using your OpenAI account; older saved cards still open.
+  `MEME_MODEL` optionally overrides the meme
+  model; by default it uses the configured full analysis model.
+  Use **Copy full text** to copy all full explanations with linked references for
+  Google Docs, or **Print / PDF** to print the versions currently selected for
+  each section without the app controls.
 - **Progress** — the full 9-stage activity log streams live during a comparison.
 - **Details** — inspect extractions and synthesis for runs completed in the
   current browser session.
@@ -94,7 +157,10 @@ browser. Command-line runs regenerate the same HTML export.
 Press **Ctrl+C** in the terminal to stop the server.
 
 > **Note:** the UI runs the real pipeline, so each run makes live OpenAI API
-> calls (same cost as a command-line run). Only one run happens at a time.
+> calls. Meme generation makes one model request, with no automatic correction,
+> network, or rate-limit retries. Invalid output stops generation and
+> leaves the full report available. Reading saved memes makes no model calls.
+> Only one comparison pipeline runs at a time.
 
 ---
 

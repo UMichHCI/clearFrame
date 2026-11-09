@@ -1,0 +1,409 @@
+{
+  "version": 2,
+  "templates": [
+    {
+      "id": "drake",
+      "file": "drake.jpg",
+      "description": "Two panels: Drake rejects the top option and approves the bottom option. Contrast the overlooked priority with what the article emphasizes.",
+      "slots": [
+        {
+          "id": "rejected",
+          "meaning": "Overlooked or rejected priority",
+          "box": [
+            0.51,
+            0.02,
+            0.48,
+            0.46
+          ],
+          "max_words": 14,
+          "max_chars": 95,
+          "background": "#ffffff",
+          "color": "#222222"
+        },
+        {
+          "id": "preferred",
+          "meaning": "Preferred or emphasized priority",
+          "box": [
+            0.51,
+            0.52,
+            0.48,
+            0.46
+          ],
+          "max_words": 14,
+          "max_chars": 95,
+          "background": "#ffffff",
+          "color": "#222222"
+        }
+      ],
+      "fit_rule": "Use when the finding shows one concrete priority getting attention over another. Write contrasting choices or questions in a natural voice, not attention-level labels."
+    },
+    {
+      "id": "spiderman",
+      "file": "spiderman.jpg",
+      "description": "Two Spider-Men accuse each other. Give each character a short identity label and a separate line of satirical dialogue expressing the documented competing accounts of blame.",
+      "slots": [
+        {
+          "id": "left",
+          "meaning": "Satirical dialogue from the left actor",
+          "box": [
+            0.02,
+            0.03,
+            0.44,
+            0.17
+          ],
+          "max_words": 14,
+          "max_chars": 90
+        },
+        {
+          "id": "right",
+          "meaning": "Satirical dialogue from the right actor",
+          "box": [
+            0.53,
+            0.03,
+            0.45,
+            0.17
+          ],
+          "max_words": 14,
+          "max_chars": 90
+        },
+        {
+          "id": "left_actor",
+          "meaning": "Short identity of the left speaker",
+          "box": [
+            0.1,
+            0.42,
+            0.22,
+            0.07
+          ],
+          "max_words": 5,
+          "max_chars": 30,
+          "background": "#ffffff",
+          "color": "#222222",
+          "legacy_optional": true
+        },
+        {
+          "id": "right_actor",
+          "meaning": "Short identity of the right speaker",
+          "box": [
+            0.71,
+            0.53,
+            0.23,
+            0.07
+          ],
+          "max_words": 5,
+          "max_chars": 30,
+          "background": "#ffffff",
+          "color": "#222222",
+          "legacy_optional": true
+        }
+      ],
+      "fit_rule": "Requires two identifiable sides pointing responsibility at each other. Do not use for a generic neglected question, or infer equal responsibility from the visual symmetry."
+    },
+    {
+      "id": "simpsons",
+      "file": "simpsons.jpg",
+      "description": "Skinner briefly questions himself in the top panel, then blames others in the bottom. The original captions are covered. Show an assumption avoiding scrutiny.",
+      "slots": [
+        {
+          "id": "question",
+          "meaning": "A brief moment of self-questioning",
+          "box": [
+            0.02,
+            0.31,
+            0.96,
+            0.19
+          ],
+          "max_words": 16,
+          "max_chars": 110,
+          "background": "#ffffff",
+          "color": "#222222"
+        },
+        {
+          "id": "dismissal",
+          "meaning": "Dismissive explanation that preserves the assumption",
+          "box": [
+            0.02,
+            0.79,
+            0.96,
+            0.21
+          ],
+          "max_words": 16,
+          "max_chars": 110,
+          "background": "#ffffff",
+          "color": "#222222"
+        }
+      ],
+      "fit_rule": "The first line briefly questions a premise. The second comically dodges it and restores the same premise. A subject change without that reversal is too weak."
+    },
+    {
+      "id": "butterfly",
+      "file": "butterfly.jpg",
+      "description": "A person gestures at a butterfly and misidentifies it. The old bottom caption is covered. Name the observer, the actual thing, and the questionable label.",
+      "slots": [
+        {
+          "id": "observer",
+          "meaning": "Who is interpreting the event",
+          "box": [
+            0.02,
+            0.03,
+            0.48,
+            0.15
+          ],
+          "max_words": 6,
+          "max_chars": 40
+        },
+        {
+          "id": "reality",
+          "meaning": "The event or action being interpreted",
+          "box": [
+            0.55,
+            0.02,
+            0.43,
+            0.22
+          ],
+          "max_words": 8,
+          "max_chars": 55
+        },
+        {
+          "id": "question",
+          "meaning": "A short question starting with Is this",
+          "box": [
+            0.01,
+            0.88,
+            0.98,
+            0.12
+          ],
+          "max_words": 10,
+          "max_chars": 70,
+          "background": "#ffffff",
+          "color": "#222222"
+        }
+      ],
+      "fit_rule": "The question must actually misidentify or euphemize the concrete thing, exposing a consequential framing error. A synonym or the same action with different wording is not a punchline."
+    },
+    {
+      "id": "office",
+      "file": "office.jpg",
+      "description": "A boardroom asks for ideas. Two agreeable answers are accepted; a third person offers an uncomfortable alternative and is thrown out. Fill the four speech bubbles.",
+      "slots": [
+        {
+          "id": "prompt",
+          "meaning": "The question posed to the group",
+          "box": [
+            0.24,
+            0.025,
+            0.69,
+            0.085
+          ],
+          "max_words": 12,
+          "max_chars": 85,
+          "color": "#222222"
+        },
+        {
+          "id": "first",
+          "meaning": "First familiar answer",
+          "box": [
+            0.04,
+            0.37,
+            0.28,
+            0.1
+          ],
+          "max_words": 9,
+          "max_chars": 60,
+          "color": "#222222"
+        },
+        {
+          "id": "second",
+          "meaning": "Second familiar answer",
+          "box": [
+            0.38,
+            0.37,
+            0.23,
+            0.1
+          ],
+          "max_words": 9,
+          "max_chars": 60,
+          "color": "#222222"
+        },
+        {
+          "id": "alternative",
+          "meaning": "The dismissed alternative explanation",
+          "box": [
+            0.66,
+            0.37,
+            0.28,
+            0.11
+          ],
+          "max_words": 14,
+          "max_chars": 90,
+          "color": "#222222"
+        }
+      ],
+      "fit_rule": "Stage a natural conversation: a specific question, two answers following the dominant premise, then an overlooked alternative. The ejection is a comic metaphor for marginalization, not a claim someone was literally fired."
+    },
+    {
+      "id": "snl",
+      "file": "snl.jpg",
+      "description": "A man shoots someone in the first panel, then looks at the audience in the second. Illustrate a contribution to a problem disappearing from the later explanation. Depict the reporting logic, not a new allegation of violence.",
+      "slots": [
+        {
+          "id": "action",
+          "meaning": "The action or context that the analysis says gets overlooked",
+          "box": [
+            0.03,
+            0.02,
+            0.94,
+            0.14
+          ],
+          "max_words": 10,
+          "max_chars": 70
+        },
+        {
+          "id": "reaction",
+          "meaning": "The later explanation that overlooks that contribution",
+          "box": [
+            0.03,
+            0.83,
+            0.94,
+            0.15
+          ],
+          "max_words": 12,
+          "max_chars": 85
+        }
+      ],
+      "fit_rule": "Name an action and a later explanation that omits its possible contribution. The joke requires that missing causal link, rather than merely placing two events in sequence."
+    },
+    {
+      "id": "pam",
+      "file": "pam.jpg",
+      "description": "Pam compares two pictures and delivers a concise conclusion. Label both pictures and replace the old bottom caption with the precise shared feature supported by the finding.",
+      "slots": [
+        {
+          "id": "first",
+          "meaning": "First description or criterion",
+          "box": [
+            0.06,
+            0.08,
+            0.43,
+            0.23
+          ],
+          "max_words": 8,
+          "max_chars": 55,
+          "background": "#ffffff",
+          "color": "#222222"
+        },
+        {
+          "id": "second",
+          "meaning": "Comparable second description or criterion",
+          "box": [
+            0.54,
+            0.16,
+            0.43,
+            0.23
+          ],
+          "max_words": 8,
+          "max_chars": 55,
+          "background": "#ffffff",
+          "color": "#222222"
+        },
+        {
+          "id": "conclusion",
+          "meaning": "A specific shared feature that makes the contrast revealing",
+          "box": [
+            0.02,
+            0.9,
+            0.96,
+            0.1
+          ],
+          "max_words": 12,
+          "max_chars": 85,
+          "background": "#ffffff",
+          "color": "#222222",
+          "legacy_optional": true
+        }
+      ],
+      "fit_rule": "Use for comparable conduct described or judged differently. State the narrow similarity in the conclusion instead of claiming total moral or legal equivalence."
+    },
+    {
+      "id": "goose",
+      "file": "goose.jpg",
+      "description": "A goose chases a fleeing person. The goose represents an uncomfortable question or overlooked evidence; the person represents the account avoiding it.",
+      "slots": [
+        {
+          "id": "question",
+          "meaning": "Uncomfortable question or evidence doing the chasing",
+          "box": [
+            0.02,
+            0.56,
+            0.48,
+            0.18
+          ],
+          "max_words": 12,
+          "max_chars": 85
+        },
+        {
+          "id": "avoiding",
+          "meaning": "The account or assumption avoiding that question",
+          "box": [
+            0.55,
+            0.02,
+            0.43,
+            0.18
+          ],
+          "max_words": 12,
+          "max_chars": 85
+        }
+      ],
+      "fit_rule": "The goose asks one concrete uncomfortable question. The fleeing label identifies the actor, article, or specific account avoiding it; an abstract issue receiving attention is not itself a fleeing character."
+    },
+    {
+      "id": "choice",
+      "file": "choice.jpg",
+      "description": "A sweating person faces two red buttons. Name the chooser and two genuinely incompatible priorities or standards documented in the analysis.",
+      "slots": [
+        {
+          "id": "first",
+          "meaning": "First competing priority or standard",
+          "box": [
+            0.04,
+            0.07,
+            0.4,
+            0.12
+          ],
+          "max_words": 7,
+          "max_chars": 45,
+          "background": "#ffffff",
+          "color": "#222222"
+        },
+        {
+          "id": "second",
+          "meaning": "Second competing priority or standard",
+          "box": [
+            0.42,
+            0.015,
+            0.42,
+            0.15
+          ],
+          "max_words": 7,
+          "max_chars": 45,
+          "background": "#ffffff",
+          "color": "#222222"
+        },
+        {
+          "id": "chooser",
+          "meaning": "The specific actor caught between the incompatible demands",
+          "box": [
+            0.03,
+            0.52,
+            0.4,
+            0.1
+          ],
+          "max_words": 7,
+          "max_chars": 45,
+          "legacy_optional": true
+        }
+      ],
+      "fit_rule": "Only use when a named actor faces a real contradiction or incompatible demands. Two compatible questions, two article topics, or two tests that can both be applied are not a dilemma."
+    }
+  ]
+}

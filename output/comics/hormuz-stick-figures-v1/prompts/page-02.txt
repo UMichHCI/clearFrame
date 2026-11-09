@@ -1,0 +1,35 @@
+Use case: illustration-story. Create ONE finished page of a SIX-PAGE continuous stick-figure explanatory comic based on ClearFrame's local results-preview.html report "Can the U.S. and Iran take the off-ramp?"
+ART DIRECTION IS STRICT: genuine STICK FIGURES ONLY. Circular heads, two dot eyes, simple mouths, single black lines for torsos/arms/legs. No realistic people, no detailed anatomy, no filled human silhouettes, no elaborate clothes. Tiny simple badges identify recurring characters. Mostly black ink on warm white paper, clean flat muted accent colors on badges and props only. Expressive stick-figure gestures, visual metaphors, clear storytelling. This should read like an accessible hand-drawn explainer comic, not a government infographic or an academic poster. No caricatures or ethnic stereotypes, no graphic violence, no new real-world events.
+CONTINUITY: one recurring curious READER stick figure with simple round glasses and a small book appears throughout. U.S. badge blue; Iran badge green; Israel badge gold; Oman badge purple; Saudi Arabia badge rust. Trump is a stick figure with a tiny red tie and a name badge, no realistic face. Michael Singh has square glasses and badge "Singh". Congress is a small group with a sign "Congress". Publications appear as labeled papers or screens, not as government spokespeople. Ships are simple line drawings with rectangular hulls. No real-world meeting is implied by the explanatory stage on which viewpoints converse.
+LAYOUT: portrait comic page, large title and page number, SIX panels in a clearly numbered 2-column by 3-row grid, read left-to-right then downward. Give every panel ample space for artwork and very legible text. Concrete action and visual continuity, not six blocks of prose. Place the exact caption and dialogue provided for each panel in clean narration boxes and speech balloons. Clearly attach balloons to their specified speakers. All text supplied below must be spelled correctly and readable. Do not add other claims, random labels or extra dialogue.
+SOURCE RULES: all dialogue is analytical paraphrase, not authenticated quotations. Use only the supplied findings. No invented deal, military outcome, endorsement, or consensus. Distinguish U.S./Israeli governments from Israeli publications; distinguish Iran's state broadcaster from all Iranian opinion. Acknowledgment that U.S. and Israel began the war must not be omitted. A reported legal objection is not a legal ruling. Inferences about Iranian leaders' motives must be attributed to Singh's explanation, not displayed as access to their actual thoughts. Uncertainty and meaningful qualifications matter.
+On every page include the small, readable footer exactly: "Based on the ClearFrame report. Dialogue is reconstructed, not quoted."
+PAGE TITLE: "THE ASSUMPTION UNDER THE TABLE"
+Page number: "2 / 6"
+
+Panel 1: Continue directly from page 1. READER reaches a policy table where Michael Singh, clearly badge-labeled, points toward a door marked "Talks".
+Caption: "Michael Singh is a former U.S. security official from the Bush administration."
+Singh: "Words and force can both be used to seek negotiations."
+
+Panel 2: Singh sorts two simple tool cards, "Talks" and "Strikes", on the same table. READER notices the arrangement.
+Caption: "The article presents attacks as available instruments of policy."
+READER: "Force is already on the menu."
+
+Panel 3: READER lifts a small tabletop flap labeled "Assumption" and finds a question card beneath it.
+READER: "Before choosing a tool, shouldn't we ask whether using it is justified?"
+Caption: "A question about effectiveness can leave a question about permission unexamined."
+
+Panel 4: Oman stick figure introduces a paper labeled "Times of Oman". On the paper, readable text "Article 2(4)" and a question mark, not a judge's verdict.
+Caption: "The Omani comparison includes Iran's objection under the U.N. Charter."
+Oman perspective: "We cannot assume attacks are justified merely because they might work."
+
+Panel 5: READER puts a question mark, rather than a verdict stamp, beside the legal objection.
+READER: "Reporting a legal objection does not prove it correct."
+Caption: "It still makes permission to use force a separate issue."
+
+Panel 6: READER sees the U.S. policy-frame figure standing between two doors, "Results" and "Authority".
+Caption: "This is not an unconditional endorsement: NPR also acknowledges who began the war."
+READER: "Who decides whether force may continue?"
+
+
+REFERENCE IMAGE ROLE: The supplied image is page 1, used ONLY as the visual style and recurring-character reference. Generate a NEW continuation page with the page number and story content specified above. Do not edit, duplicate, or recreate page 1's panels. Match its simple black-line stick figures, round-glasses Reader, colored name badges, paper background, typography, and six-panel reading order. Every figure must remain a stick figure even for named real people. Keep the same Reader and recurring figures recognizable.

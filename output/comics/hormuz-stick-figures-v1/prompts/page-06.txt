@@ -1,0 +1,35 @@
+Use case: illustration-story. Create ONE finished page of a SIX-PAGE continuous stick-figure explanatory comic based on ClearFrame's local results-preview.html report "Can the U.S. and Iran take the off-ramp?"
+ART DIRECTION IS STRICT: genuine STICK FIGURES ONLY. Circular heads, two dot eyes, simple mouths, single black lines for torsos/arms/legs. No realistic people, no detailed anatomy, no filled human silhouettes, no elaborate clothes. Tiny simple badges identify recurring characters. Mostly black ink on warm white paper, clean flat muted accent colors on badges and props only. Expressive stick-figure gestures, visual metaphors, clear storytelling. This should read like an accessible hand-drawn explainer comic, not a government infographic or an academic poster. No caricatures or ethnic stereotypes, no graphic violence, no new real-world events.
+CONTINUITY: one recurring curious READER stick figure with simple round glasses and a small book appears throughout. U.S. badge blue; Iran badge green; Israel badge gold; Oman badge purple; Saudi Arabia badge rust. Trump is a stick figure with a tiny red tie and a name badge, no realistic face. Michael Singh has square glasses and badge "Singh". Congress is a small group with a sign "Congress". Publications appear as labeled papers or screens, not as government spokespeople. Ships are simple line drawings with rectangular hulls. No real-world meeting is implied by the explanatory stage on which viewpoints converse.
+LAYOUT: portrait comic page, large title and page number, SIX panels in a clearly numbered 2-column by 3-row grid, read left-to-right then downward. Give every panel ample space for artwork and very legible text. Concrete action and visual continuity, not six blocks of prose. Place the exact caption and dialogue provided for each panel in clean narration boxes and speech balloons. Clearly attach balloons to their specified speakers. All text supplied below must be spelled correctly and readable. Do not add other claims, random labels or extra dialogue.
+SOURCE RULES: all dialogue is analytical paraphrase, not authenticated quotations. Use only the supplied findings. No invented deal, military outcome, endorsement, or consensus. Distinguish U.S./Israeli governments from Israeli publications; distinguish Iran's state broadcaster from all Iranian opinion. Acknowledgment that U.S. and Israel began the war must not be omitted. A reported legal objection is not a legal ruling. Inferences about Iranian leaders' motives must be attributed to Singh's explanation, not displayed as access to their actual thoughts. Uncertainty and meaningful qualifications matter.
+On every page include the small, readable footer exactly: "Based on the ClearFrame report. Dialogue is reconstructed, not quoted."
+PAGE TITLE: "A WIDER WAY OUT"
+Page number: "6 / 6"
+
+Panel 1: Return to the SAME tanker and shared question from page 1. READER now has several small question cards, rather than a victorious answer.
+Caption: "The reader returns to the original question with a wider set of tests."
+READER: "What would end the Hormuz crisis?"
+
+Panel 2: U.S. policy-frame figure, Iran's state-media-frame figure, and the READER look at opposite causal arrows around the tanker. Badge labels clearly identify the framed perspectives.
+U.S. policy-frame figure: "Would our pressure produce talks and lasting calm?"
+Iran state-media-frame figure: "Is American pressure itself creating insecurity?"
+
+Panel 3: Oman perspective holds the legal-objection paper; READER holds the Jerusalem Post paper beside a Congress sign. No Israeli government official is made to speak for the newspaper.
+Oman perspective: "Permission to use force cannot be assumed."
+READER: "The Israeli comparison also asks about congressional authority."
+
+Panel 4: Saudi Arabia and Oman place reciprocal-condition cards and the IMO shared-arrangement diagram on the still-unsettled negotiating table.
+Saudi Arabia: "Both sides may need to change."
+Oman perspective: "American terms and shared arrangements also belong in the discussion."
+
+Panel 5: U.S. family, other families, farmer, Republican lawmakers, Congress, and a U.N. warning paper are all visible around the READER. Keep actors clearly labeled and draw no false hierarchy of whose pain is real.
+READER: "Whose costs count, and who gets to set the limits?"
+Caption: "Shipping, power, permission, bargaining terms, and human hardship all enter the picture."
+
+Panel 6: A final large-feeling scene within the last panel: READER lays NPR, Press TV, Times of Oman, Oman Observer, Okaz, Jerusalem Post, and Middle East Monitor papers side by side. In the background the U.S., Iran, Israel, Oman, and Saudi Arabia badges surround the waiting tanker; negotiations remain unresolved. No invented handshake or treaty.
+READER: "I can see what each explanation brings forward—and what it leaves less examined."
+Caption: "Coverage patterns do not establish journalists' intentions or a whole country's consensus."
+
+
+REFERENCE IMAGE ROLE: The supplied image is page 1, used ONLY as the visual style and recurring-character reference. Generate a NEW continuation page with the page number and story content specified above. Do not edit, duplicate, or recreate page 1's panels. Match its simple black-line stick figures, round-glasses Reader, colored name badges, paper background, typography, and six-panel reading order. Every figure must remain a stick figure even for named real people. Keep the same Reader and recurring figures recognizable.

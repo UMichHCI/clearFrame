@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 load_dotenv()
 MODEL_MINI   = "gpt-6-luna"     # lightweight tasks: query plan and topical gate
 MODEL_FULL   = "gpt-6.1-sol"    # heavier tasks: article extraction, pair analysis, synthesis
+MODEL_MEMES  = os.environ.get("MEME_MODEL", MODEL_FULL)  # template selection and captions
+MODEL_PERSPECTIVES = os.environ.get("PERSPECTIVE_MODEL", MODEL_FULL)
 
 # Additional completion capacity for internal reasoning, beyond each stage's
 # answer budget. These are ceilings, not fixed token usage or charges.

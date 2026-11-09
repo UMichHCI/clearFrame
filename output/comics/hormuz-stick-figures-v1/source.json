@@ -1,0 +1,41 @@
+{
+  "source": "results-preview.html",
+  "sha256": "1ab5f971bd7b58170a5c558c5bfa6bcc348a70a30ef3524e9e77f8256faf9431",
+  "generation": "Built-in image generation",
+  "pages": 6,
+  "files": [
+    {
+      "page": 1,
+      "image": "page-01.png",
+      "prompt": "prompts/page-01.txt"
+    },
+    {
+      "page": 2,
+      "image": "page-02.png",
+      "prompt": "prompts/page-02.txt"
+    },
+    {
+      "page": 3,
+      "image": "page-03.png",
+      "prompt": "prompts/page-03.txt"
+    },
+    {
+      "page": 4,
+      "image": "page-04.png",
+      "prompt": "prompts/page-04.txt"
+    },
+    {
+      "page": 5,
+      "image": "page-05.png",
+      "prompt": "prompts/page-05.txt"
+    },
+    {
+      "page": 6,
+      "image": "page-06.png",
+      "prompt": "prompts/page-06.txt"
+    }
+  ],
+  "reading_copy": "index.html",
+  "pdf": "comic.pdf",
+  "pdf_pages": 6
+}

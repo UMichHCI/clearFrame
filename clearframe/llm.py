@@ -5,7 +5,7 @@ from openai import RateLimitError
 
 from .config import MODEL_MINI, MODEL_REASONING
 def api_chat(client, system: str, user: str, max_tokens: int = 2000,
-             model: str | None = None, response_format=None) -> str:
+             model: str | None = None, response_format=None, retry_rate_limits: bool = True) -> str:
     """Chat completion with model-specific reasoning and rate-limit backoff.
 
     max_tokens is the stage's answer budget. For configured reasoning models,
@@ -41,6 +41,8 @@ def api_chat(client, system: str, user: str, max_tokens: int = 2000,
                 raise RuntimeError(f"{chosen} returned an empty response.")
             return content.strip()
         except RateLimitError:
+            if not retry_rate_limits:
+                raise
             wait = 2 ** attempt
             print(f"  [Rate limit] Waiting {wait}s (attempt {attempt + 1}/6)...")
             time.sleep(wait)

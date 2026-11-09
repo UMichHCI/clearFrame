@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClearFrame — Perspective map example</title>
+<style>
+:root{color-scheme:light;--paper:#faf8f3;--ink:#282720;--muted:#797268;--line:#d9d2c6;--red:#833c32;--serif:Georgia,"Times New Roman",serif;--sans:"Segoe UI",Arial,sans-serif}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--paper);font:14px/1.6 var(--sans)}
+button,a{-webkit-tap-highlight-color:transparent}button{font:inherit;cursor:pointer}a{color:inherit;text-underline-offset:4px}button:focus-visible,a:focus-visible{outline:2px solid var(--red);outline-offset:5px}
+.shell{max-width:1240px;padding:0 48px 45px;margin:auto}.masthead{display:flex;align-items:baseline;gap:26px;border-bottom:3px double var(--ink);padding:24px 0 18px}.brand{font:bold 32px var(--serif);letter-spacing:-1.5px}.brand span{color:var(--red)}.masthead p{margin:0;color:var(--muted);font:italic 14px var(--serif)}.example{margin-left:auto;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.section-title{display:flex;justify-content:space-between;align-items:center;gap:20px;padding-top:29px}.section-title h1{font:600 13px var(--sans);margin:0}.fidelity{display:flex;align-items:center;gap:3px;padding:3px;background:#f0ece3;border:1px solid var(--line);border-radius:5px;font-size:11px;color:var(--muted)}.fidelity span{padding:8px 12px;white-space:nowrap}.fidelity .active{background:var(--paper);box-shadow:0 1px 3px #00000010;color:var(--ink);font-weight:600;border-radius:3px}
+.intro{margin-top:27px}.eyebrow{margin:0 0 10px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--red)}h2{font:normal 35px/1.2 var(--serif);letter-spacing:-.7px;margin:0 0 10px}.intro>p:last-child{color:var(--muted);font-size:12px;margin:0;max-width:760px}
+.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:15px;margin:25px 0 12px}.lens{display:flex;gap:6px;flex-wrap:wrap}.lens button{border:1px solid var(--line);background:transparent;border-radius:20px;padding:7px 13px;font-size:11px;color:var(--muted)}.lens button[aria-pressed=true]{color:var(--red);border-color:#b88679;background:#f7eee8}.instruction{font-size:10px;color:var(--muted);margin:0}
+.map{position:relative;height:525px;border:1px solid var(--line);border-radius:6px;background:radial-gradient(#d6cfc240 .7px,transparent .7px) 0 0/15px 15px;overflow:hidden}.connections{position:absolute;width:100%;height:100%;inset:0;pointer-events:none}.connections path{fill:none;stroke:#b5ada0;stroke-width:1.3}.connections .overlap{stroke:#7a9b96;stroke-dasharray:5 5}.connections text{font:10px var(--sans);fill:#5d7b75}
+.node{position:absolute;width:29%;border:1px solid #c8beb0;border-top:3px solid var(--node-color);background:#fdfbf7;border-radius:4px;padding:16px 18px;text-align:left;color:var(--ink);box-shadow:0 3px 10px #2d271a04;transition:box-shadow .15s,border-color .15s}.node:hover,.node[aria-pressed=true]{border-color:var(--node-color);box-shadow:0 4px 16px #2d271a10}.node[aria-pressed=true]{background:var(--node-tint)}.node .source{display:block;font-size:10px;font-weight:600;letter-spacing:.2px;color:var(--node-color);margin-bottom:8px}.node .question{display:block;font:normal 21px/1.28 var(--serif);letter-spacing:-.3px;margin-bottom:10px}.node .focus{display:block;font-size:10px;line-height:1.6;color:var(--muted)}
+.source-node{--node-color:#9a4b3c;--node-tint:#faf0e9;left:2.4%;top:24px}.oman-node{--node-color:#386d66;--node-tint:#edf4ef;right:2.4%;top:24px}.iran-node{--node-color:#9b7734;--node-tint:#faf3e4;left:2.4%;bottom:24px}.israel-node{--node-color:#526d85;--node-tint:#eef2f6;right:2.4%;bottom:24px}
+.center{position:absolute;width:29%;left:35.5%;top:50%;transform:translateY(-50%);text-align:center;padding:22px 13px;background:var(--paper);border-top:1px solid #aaa18f;border-bottom:1px solid #aaa18f}.center .eyebrow{font-size:9px;color:var(--muted);letter-spacing:1.3px;margin-bottom:10px}.center strong{display:block;font:normal 27px/1.2 var(--serif);letter-spacing:-.4px}.center small{display:block;font-size:10px;color:var(--muted);margin-top:12px}
+.takeaway{border-left:2px solid var(--red);padding:0 0 0 16px;margin:22px 0 26px;max-width:950px}.takeaway p{margin:0;font:18px/1.65 var(--serif)}.takeaway strong{font-weight:normal;color:var(--red)}
+.detail{display:grid;grid-template-columns:240px 1fr;gap:25px;padding:21px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.detail h3{font:normal 23px var(--serif);margin:4px 0 6px}.detail .place{font-size:11px;color:var(--muted);margin:0}.detail .label{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin:0}.detail .explanation{margin:0 0 10px;font:16px/1.8 var(--serif);max-width:730px}.detail a{font-size:11px;color:var(--red)}
+.note{font-size:11px;line-height:1.8;color:var(--muted);margin:18px 0 0;max-width:900px}.bottom{font-size:10px;color:var(--muted);margin-top:22px;display:flex;justify-content:space-between;gap:20px}
+@media(prefers-reduced-motion:reduce){.node{transition:none}}
+@media(max-width:800px){.shell{padding:0 22px 30px}.masthead p,.example{display:none}.section-title{align-items:flex-start;flex-direction:column;gap:14px}h2{font-size:30px}.map-toolbar{flex-direction:column;align-items:flex-start}.map{height:auto;padding:18px;display:flex;flex-direction:column;gap:14px}.connections{display:none}.center{position:static;transform:none;width:100%;order:0;margin:0 0 8px;padding:16px}.center strong{font-size:25px}.node{position:static;width:100%;order:1}.node .question{font-size:22px}.node .focus{font-size:11px}.detail{grid-template-columns:1fr;gap:12px}.fidelity{font-size:10px}.fidelity span{padding:8px 10px}.bottom{flex-direction:column;gap:4px}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="masthead"><div class="brand">ClearFrame<span>.</span></div><p>A wider view of the same story.</p><span class="example">Interactive example</span></header>
+  <div class="section-title"><h1>What we found</h1><div class="fidelity" aria-label="Example placement within the summary"><span>High fidelity</span><span class="active">Middle fidelity</span><span>Low fidelity</span></div></div>
+  <section class="intro"><p class="eyebrow">Perspective map</p><h2>One story. Different starting points.</h2><p>How the selected articles frame a possible U.S.–Iran agreement. The questions below summarize their emphasis.</p></section>
+  <div class="map-toolbar"><div class="lens" role="group" aria-label="Compare perspectives on"><button data-lens="change" aria-pressed="true">What needs to change?</button><button data-lens="attention" aria-pressed="false">What gets attention?</button></div><p class="instruction">Select an article to see the explanation and source ↓</p></div>
+  <div class="map" aria-label="Map of four article perspectives around a shared question">
+    <svg class="connections" viewBox="0 0 1000 525" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M 310 120 C 360 120 340 220 395 235"/><path d="M 690 120 C 640 120 660 220 605 235"/>
+      <path d="M 310 405 C 360 405 340 310 395 290"/><path d="M 690 405 C 640 405 660 310 605 290"/>
+      <path class="overlap" d="M 838 205 L 838 340"/><text x="850" y="263">Shared theme:</text><text x="850" y="280">blockade relief</text>
+    </svg>
+    <div class="center"><p class="eyebrow">The shared question</p><strong>What has to change<br>for an agreement?</strong><small>Each article brings a different question forward.</small></div>
+    <button class="node source-node" data-perspective="source" aria-pressed="true"><span class="source">YOUR ARTICLE · NPR</span><span class="question">Will pressure bring Iran back to talks?</span><span class="focus">Focus: leverage, prices, and elections.</span></button>
+    <button class="node oman-node" data-perspective="oman" aria-pressed="false"><span class="source">COMPARISON · TIMES OF OMAN</span><span class="question">Must both sides keep their commitments?</span><span class="focus">Focus: safe passage and blockade relief.</span></button>
+    <button class="node iran-node" data-perspective="iran" aria-pressed="false"><span class="source">COMPARISON · PRESS TV</span><span class="question">Who is bearing the human cost?</span><span class="focus">Focus: Iranian casualties and resistance.</span></button>
+    <button class="node israel-node" data-perspective="israel" aria-pressed="false"><span class="source">COMPARISON · THE JERUSALEM POST</span><span class="question">What U.S. policy change could help?</span><span class="focus">Focus: ending the blockade as part of talks.</span></button>
+  </div>
+  <div class="takeaway"><p id="takeaway"><strong>The main difference:</strong> your article examines how to change Iran’s behavior; the comparisons give more room to changes Washington might need to make.</p></div>
+  <section class="detail" aria-labelledby="detail-title">
+    <div><p class="label">Selected perspective</p><h3 id="detail-title">Your article · NPR</h3><p id="detail-place" class="place">Published in the United States</p></div>
+    <div><p id="detail-text" class="explanation">The analysis finds that this article treats American pressure as a tool for bringing Iran to negotiations. It gives more scrutiny to Iran’s willingness to change than to American obligations, while acknowledging U.S. and Israeli responsibility for starting the war.</p><a id="detail-link" href="https://www.npr.org/2026/07/27/g-s1-135611/can-the-u-s-and-iran-take-the-off-ramp" target="_blank" rel="noopener noreferrer">Read the source article ↗</a></div>
+  </section>
+  <p class="note">Solid lines connect each article to the shared question. The dashed line marks a shared emphasis in two comparison articles. The cards describe specific articles, not every viewpoint in a country; their positions on the page are not a ranking.</p>
+  <footer class="bottom"><span>Example based on the saved ClearFrame comparison.</span><span>Long explanation → Perspective map → Meme</span></footer>
+</main>
+<script>
+const perspectives = {
+  source: {title:'Your article · NPR',place:'Published in the United States',url:'https://www.npr.org/2026/07/27/g-s1-135611/can-the-u-s-and-iran-take-the-off-ramp',
+    text:'The analysis finds that this article treats American pressure as a tool for bringing Iran to negotiations. It gives more scrutiny to Iran’s willingness to change than to American obligations, while acknowledging U.S. and Israeli responsibility for starting the war.',
+    change:['Will pressure bring Iran back to talks?','Focus: leverage, prices, and elections.'],attention:['What does the conflict cost Americans?','Focus: household prices and electoral risks.']},
+  oman: {title:'Times of Oman',place:'Published in Oman',url:'https://timesofoman.com/article/174369-explainer-is-the-us-iran-memorandum-of-understanding-still-alive',
+    text:'The comparison highlights commitments on both sides: lifting the American blockade and ensuring safe passage for ships. It shifts the question from whether pressure works to whether both governments are doing what they agreed. Allegations of breaches remain allegations.',
+    change:['Must both sides keep their commitments?','Focus: safe passage and blockade relief.'],attention:['Are both governments keeping their promises?','Focus: the terms of an agreement.']},
+  iran: {title:'Press TV',place:'Published in Iran · state broadcaster',url:'https://www.presstv.ir/Detail/2026/07/20/772658/War-to-continue-until-deterrence-achieved-Iran',
+    text:'The analysis highlights this article’s attention to Iranian deaths and injuries, alongside the government’s justification of continued resistance. The source’s political purpose matters, but does not itself invalidate the suffering it reports.',
+    change:['Who is bearing the human cost?','Focus: Iranian casualties and resistance.'],attention:['What happens to people under the strikes?','Focus: reported deaths and injuries in Iran.']},
+  israel: {title:'The Jerusalem Post',place:'Published in Israel',url:'https://www.jpost.com/middle-east/iran-news/article-905200',
+    text:'The analysis identifies talks about ending the American blockade as a concrete settlement option in this article. This overlaps with the Omani comparison’s attention to blockade relief, while giving readers another way to understand what could move negotiations forward.',
+    change:['What U.S. policy change could help?','Focus: ending the blockade as part of talks.'],attention:['Could ending the blockade help negotiations?','Focus: a possible route to an agreement.']}
+};
+const takeaways = {
+  change:'The main difference: your article examines how to change Iran’s behavior; the comparisons give more room to changes Washington might need to make.',
+  attention:'The main difference: American prices and political costs are more concrete in your article; the comparisons add Iranian suffering, shared commitments, and possible concessions.'
+};
+document.querySelectorAll('[data-perspective]').forEach(button=>button.addEventListener('click',()=>{
+  const item=perspectives[button.dataset.perspective];
+  document.querySelectorAll('[data-perspective]').forEach(node=>node.setAttribute('aria-pressed',String(node===button)));
+  document.querySelector('#detail-title').textContent=item.title; document.querySelector('#detail-place').textContent=item.place;
+  document.querySelector('#detail-text').textContent=item.text; document.querySelector('#detail-link').href=item.url;
+}));
+document.querySelectorAll('[data-lens]').forEach(button=>button.addEventListener('click',()=>{
+  const lens=button.dataset.lens;
+  document.querySelectorAll('[data-lens]').forEach(node=>node.setAttribute('aria-pressed',String(node===button)));
+  document.querySelectorAll('[data-perspective]').forEach(node=>{
+    const content=perspectives[node.dataset.perspective][lens];
+    node.querySelector('.question').textContent=content[0];node.querySelector('.focus').textContent=content[1];
+  });
+  document.querySelector('#takeaway').textContent=takeaways[lens];
+}));
+</script>
+</body>
+</html>

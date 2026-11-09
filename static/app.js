@@ -11,6 +11,10 @@ const copyResultsBtn = $("#copyResults");
 const printResultsBtn = $("#printResults");
 const resultsFileInput = $("#resultsFile");
 const importStatus = $("#importStatus");
+const saveResultsBtn = $("#saveResults");
+const sectionModes = new Map(), renderedMemes = new Map();
+let memeState = 'idle', memeError = '', memeController = null, memeRenderVersion = 0;
+let perspectiveState = 'idle', perspectiveError = '', perspectiveController = null, perspectiveVersion = 0;
 let running = false, rawLog = "", latestResults = null;
 let runGeneration = 0;
 
@@ -228,7 +232,11 @@ async function copyResults(){
 }
 
 copyResultsBtn.onclick = copyResults;
-printResultsBtn.onclick = () => { if (latestResults) window.print(); };
+printResultsBtn.onclick = async () => {
+  if (!latestResults) return;
+  if (sectionModes.get('overview') === 'comic') await globalThis.ClearFrameComic?.ready($('#overview-comic'));
+  window.print();
+};
 
 // Colorize a terminal line by its recognizable prefixes/markers.
 function classify(line){
@@ -281,8 +289,47 @@ function findingAsHtml(paragraph){
   return '<strong>' + textAsHtml(text.slice(0, split)) + '</strong>' + textAsHtml(text.slice(split));
 }
 
+function sectionViewModes(id){
+  return id === 'overview' ? ['high', 'middle', 'comic', 'low'] : ['high', 'low'];
+}
+
+function sectionViews(id, label, highContent){
+  sectionModes.set(id, 'high');
+  const middleTab = id === 'overview' ? '<button id="overview-tab-middle" type="button" role="tab" aria-selected="false" aria-controls="overview-middle" tabindex="-1" data-section="overview" data-section-mode="middle">Middle fidelity</button>' : '';
+  const comicTab = id === 'overview' ? '<button id="overview-tab-comic" type="button" role="tab" aria-selected="false" aria-controls="overview-comic" tabindex="-1" data-section="overview" data-section-mode="comic">Comic</button>' : '';
+  const comicPanel = id === 'overview' ? '<div id="overview-comic" class="section-comic" role="tabpanel" aria-labelledby="overview-tab-comic" tabindex="0" hidden>' +
+    (globalThis.ClearFrameComic?.render() || '<p class="empty">The comic could not be loaded. Reload this page to try again.</p>') + '</div>' : '';
+  const middlePanel = id === 'overview' ? '<div id="overview-middle" class="section-middle" role="tabpanel" aria-labelledby="overview-tab-middle" tabindex="0" hidden>' +
+    '<div id="overview-map"></div><div id="perspectiveControls" class="meme-controls">' +
+    '<p id="perspectiveStatus" class="meme-status" role="status" aria-live="polite"></p>' +
+    '<p id="perspectivePrivacy" class="meme-privacy">Making a map sends the analysis and article references to OpenAI and uses your account. This is a separate request from making memes.</p>' +
+    '<button type="button" id="generatePerspectives" class="generate-memes" data-generate-perspectives>Generate map</button></div></div>' : '';
+  return '<div class="section-modes" role="tablist" aria-label="View for ' + escapeAttribute(label) + '">' +
+    '<button id="' + id + '-tab-high" type="button" role="tab" aria-selected="true" aria-controls="' + id + '-high" data-section="' + id + '" data-section-mode="high">High fidelity</button>' +
+    middleTab + comicTab +
+    '<button id="' + id + '-tab-low" type="button" role="tab" aria-selected="false" aria-controls="' + id + '-low" tabindex="-1" data-section="' + id + '" data-section-mode="low">Low fidelity</button></div>' +
+    '<div id="' + id + '-high" class="section-high" role="tabpanel" aria-labelledby="' + id + '-tab-high" tabindex="0">' + highContent + '</div>' +
+    middlePanel + comicPanel +
+    '<div id="' + id + '-low" class="section-low" role="tabpanel" aria-labelledby="' + id + '-tab-low" tabindex="0" hidden>' +
+    '<div id="' + id + '-meme" class="section-meme"></div>' +
+    '<div id="' + id + '-meme-controls" class="meme-controls">' +
+    '<p id="' + id + '-meme-status" class="meme-status" role="status" aria-live="polite"></p>' +
+    '<p id="' + id + '-meme-privacy" class="meme-privacy">Making memes sends the summary text to OpenAI and uses your account. One request makes the short versions for all sections.</p>' +
+    '<button id="' + id + '-generate-memes" type="button" class="generate-memes" data-generate-memes>Generate memes</button></div></div>';
+}
+
 function renderResults(data){
+  if (perspectiveController) perspectiveController.abort();
+  perspectiveController = null; perspectiveVersion += 1;
+  perspectiveState = 'idle'; perspectiveError = '';
+  globalThis.ClearFramePerspectives?.clear();
+  if (memeController) memeController.abort();
+  memeController = null;
+  memeRenderVersion += 1;
+  memeState = 'idle'; memeError = '';
+  sectionModes.clear(); renderedMemes.clear();
   latestResults = data;
+  saveResultsBtn.disabled = false;
   copyResultsBtn.disabled = false;
   printResultsBtn.disabled = false;
   const cats = data.categories || [];
@@ -306,8 +353,8 @@ function renderResults(data){
   }
   if (data.summary){
     const refs = data.summary_supporting_articles || [];
-    html += '<section class="overview" aria-labelledby="overviewHeading"><h2 id="overviewHeading">What we found</h2>' +
-      summaryAsHtml(data.summary, refs) + reportReferences(refs) + '</section>';
+    html += '<section class="overview" id="overview" aria-labelledby="overviewHeading"><h2 id="overviewHeading">What we found</h2>' +
+      sectionViews('overview', 'What we found', summaryAsHtml(data.summary, refs) + reportReferences(refs)) + '</section>';
   }
   if (cats.length){
     html += '<nav class="report-contents" aria-label="Findings in this comparison"><h2>In this comparison</h2><ol>';
@@ -328,9 +375,10 @@ function renderResults(data){
     html += '<section class="finding" id="finding-' + number + '" aria-labelledby="findingHeading-' + number + '">' +
       '<div class="finding-heading"><span class="finding-number">' + String(number).padStart(2, '0') + '</span>' +
       '<h3 id="findingHeading-' + number + '">' + escapeHtml(categoryTitle(category)) + '</h3></div>' +
+      sectionViews('finding-' + number, categoryTitle(category),
       (description ? '<p class="finding-description">' + escapeHtml(description) + '</p>' : '') +
       '<p class="finding-body">' + findingAsHtml(category.paragraph) + '</p>' +
-      reportReferences(category.supporting_articles || []) + '</section>';
+      reportReferences(category.supporting_articles || [])) + '</section>';
   });
   html += '</section>';
   if (comparisons.length){
@@ -347,7 +395,222 @@ function renderResults(data){
     html += '<footer class="report-note">' + textAsHtml(data.structural_note) + '</footer>';
   }
   resultsEl.innerHTML = html + '</article>';
+  updateMemeControls();
+  updatePerspectiveControls();
+  if (data.perspective_map && data.summary) renderPerspectiveMap(data);
+  if (data.meme_view && ClearFrameMemes.itemIds(data).length) void renderMemeCards(data);
 }
+
+function showSectionMode(id, mode){
+  const modes = sectionViewModes(id);
+  if (!sectionModes.has(id) || !modes.includes(mode)) return;
+  sectionModes.set(id, mode);
+  for (const option of modes){
+    const selected = option === mode;
+    const button = $('#' + id + '-tab-' + option);
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    $('#' + id + '-' + option).hidden = !selected;
+  }
+  if (mode === 'comic') globalThis.ClearFrameComic?.load($('#' + id + '-comic'));
+  updateMemeControls();
+  updatePerspectiveControls();
+}
+
+function updatePrintAvailability(){
+  const eligible = new Set(latestResults ? ClearFrameMemes.itemIds(latestResults) : []);
+  const pendingMeme = [...sectionModes].some(([id, mode]) => mode === 'low' && eligible.has(id) && !renderedMemes.has(id));
+  const pendingMap = sectionModes.get('overview') === 'middle' && perspectiveState !== 'ready';
+  printResultsBtn.disabled = !latestResults || pendingMeme || pendingMap;
+}
+
+function updateMemeControls(){
+  const available = latestResults && ClearFrameMemes.itemIds(latestResults).length > 0;
+  const busy = memeState === 'generating' || memeState === 'loading';
+  const hasLowSelection = [...sectionModes.values()].includes('low');
+  $("#regenerateMemes").hidden = !hasLowSelection || !latestResults?.meme_view;
+  $("#regenerateMemes").disabled = busy;
+  const eligible = new Set(latestResults ? ClearFrameMemes.itemIds(latestResults) : []);
+  sectionModes.forEach((mode, id) => {
+    const ready = renderedMemes.has(id);
+    const canGenerate = available && eligible.has(id);
+    $('#' + id + '-meme-controls').hidden = ready && !busy && memeState !== 'error';
+    $('#' + id + '-generate-memes').hidden = !canGenerate;
+    $('#' + id + '-generate-memes').disabled = !canGenerate || busy;
+    $('#' + id + '-generate-memes').textContent = memeState === 'error' ? 'Try again' : 'Generate memes';
+    $('#' + id + '-meme-privacy').hidden = !canGenerate || busy;
+    let message = 'Turn this summary into a meme and one short sentence.';
+    if (!canGenerate) message = 'There is no short version available for this section.';
+    else if (memeState === 'generating') message = 'Writing and reviewing your memes... You can read the high fidelity version now.';
+    else if (memeState === 'loading') message = 'Putting the captions on your memes...';
+    else if (memeState === 'error') message = memeError;
+    $('#' + id + '-meme-status').textContent = message;
+    $('#' + id + '-meme-status').dataset.state = memeState;
+  });
+  updatePrintAvailability();
+}
+
+function updatePerspectiveControls(){
+  const busy = perspectiveState === 'generating';
+  $('#regeneratePerspectives').hidden = sectionModes.get('overview') !== 'middle' || !latestResults?.perspective_map;
+  $('#regeneratePerspectives').disabled = busy;
+  if (sectionModes.has('overview')){
+    $('#perspectiveControls').hidden = perspectiveState === 'ready';
+    $('#generatePerspectives').disabled = busy;
+    $('#generatePerspectives').textContent = perspectiveState === 'error' ? 'Try again' : 'Generate map';
+    $('#perspectivePrivacy').hidden = busy;
+    $('#perspectiveStatus').textContent = busy ? 'Mapping the perspectives... You can read the other versions while this finishes.' :
+      perspectiveState === 'error' ? perspectiveError : 'Explore how the articles explain the same story.';
+    $('#perspectiveStatus').dataset.state = perspectiveState;
+  }
+  updatePrintAvailability();
+}
+
+function renderPerspectiveMap(data){
+  try {
+    ClearFramePerspectives.render($('#overview-map'), data.perspective_map);
+    perspectiveState = 'ready'; perspectiveError = '';
+  } catch (_error){
+    perspectiveState = 'error'; perspectiveError = 'This map could not be displayed. Try generating it again. Your other results are still available.';
+  }
+  updatePerspectiveControls();
+}
+
+async function generatePerspectiveMap({ apiKey = keyEl.value.trim(), regenerate = false } = {}){
+  const data = latestResults;
+  if (!data?.summary || perspectiveState === 'generating') return;
+  if (data.perspective_map && !regenerate){ renderPerspectiveMap(data); return; }
+  if (!apiKey){
+    perspectiveState = 'error'; perspectiveError = 'Enter your OpenAI key on the left, then choose Try again to make a map.';
+    updatePerspectiveControls(); keyEl.focus(); return;
+  }
+  const controller = new AbortController();
+  perspectiveController = controller;
+  const version = ++perspectiveVersion;
+  perspectiveState = 'generating'; perspectiveError = ''; updatePerspectiveControls();
+  const results = { summary: data.summary, categories: data.categories, summary_supporting_articles: data.summary_supporting_articles,
+    analysis_articles: data.analysis_articles, structural_note: data.structural_note };
+  try {
+    const response = await fetch('/perspectives', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ results, api_key: apiKey }), signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (latestResults !== data || version !== perspectiveVersion) return;
+    if (!response.ok){
+      perspectiveState = 'error';
+      perspectiveError = response.status === 404 ?
+        'The app server does not have the map feature loaded. Restart app.py, reload this page, then try again.' :
+        payload.error || 'Could not make the map. Try again. Your other results are still available.';
+      updatePerspectiveControls(); return;
+    }
+    data.perspective_map = payload.perspective_map;
+    renderPerspectiveMap(data);
+  } catch (_error){
+    if (controller.signal.aborted || latestResults !== data || version !== perspectiveVersion) return;
+    perspectiveState = 'error'; perspectiveError = 'Could not make the map. Check your connection and OpenAI key, then try again. Your other results are still available.';
+    updatePerspectiveControls();
+  } finally {
+    if (perspectiveController === controller) perspectiveController = null;
+  }
+}
+
+async function renderMemeCards(data){
+  const version = ++memeRenderVersion;
+  memeState = 'loading'; updateMemeControls();
+  try {
+    const catalog = await ClearFrameMemes.catalog();
+    if (latestResults !== data || version !== memeRenderVersion) return;
+    let view;
+    try { view = ClearFrameMemes.validate(data.meme_view, data, catalog.templates); }
+    catch (error) { delete data.meme_view; throw error; }
+    const byId = new Map(catalog.templates.map(template => [template.id, template]));
+    const cards = await Promise.all(view.items.map(async item => {
+      const image = await ClearFrameMemes.render(item, byId.get(item.template_id));
+      return { id: item.id, html: '<figure class="meme-card"><a href="#' + escapeAttribute(item.id) + '" data-high-section="' + escapeAttribute(item.id) +
+        '" title="Read the full explanation"><img src="' + image + '" alt="' + escapeAttribute(item.alt_text) +
+        '"></a><figcaption>' + escapeHtml(item.sentence) + '</figcaption></figure>' };
+    }));
+    if (latestResults !== data || version !== memeRenderVersion) return;
+    data.meme_view = view;
+    cards.forEach(card => {
+      renderedMemes.set(card.id, card.html);
+      $('#' + card.id + '-meme').innerHTML = card.html;
+    });
+    memeState = 'ready'; updateMemeControls();
+  } catch (error) {
+    if (latestResults !== data || version !== memeRenderVersion) return;
+    memeState = 'error'; memeError = error.message || 'The memes could not be displayed. Try again.';
+    updateMemeControls();
+  }
+}
+
+async function generateMemes({ apiKey = keyEl.value.trim(), regenerate = false } = {}){
+  const data = latestResults;
+  if (!data || !ClearFrameMemes.itemIds(data).length || memeState === 'generating' || memeState === 'loading') return;
+  if (data.meme_view && !regenerate){ await renderMemeCards(data); return; }
+  if (!apiKey){
+    memeState = 'error'; memeError = 'Enter your OpenAI key on the left, then choose Try again to make memes.';
+    updateMemeControls(); keyEl.focus(); return;
+  }
+  const controller = new AbortController();
+  memeController = controller;
+  const version = ++memeRenderVersion;
+  memeState = 'generating'; memeError = ''; updateMemeControls();
+  // Only the finished summary and supporting references leave the browser.
+  const results = { summary: data.summary, categories: data.categories, structural_note: data.structural_note };
+  try {
+    const response = await fetch('/memes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ results, api_key: apiKey }), signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (latestResults !== data || version !== memeRenderVersion) return;
+    if (!response.ok) throw new Error(payload.error || 'Could not make memes. Try again.');
+    data.meme_view = payload.meme_view;
+    await renderMemeCards(data);
+  } catch (error) {
+    if (controller.signal.aborted || latestResults !== data || version !== memeRenderVersion) return;
+    memeState = 'error'; memeError = 'Could not make memes. Check your connection and OpenAI key, then try again. Your full results are still available.';
+    updateMemeControls();
+  } finally {
+    if (memeController === controller) memeController = null;
+  }
+}
+
+$("#regenerateMemes").onclick = () => { void generateMemes({ regenerate: true }); };
+$('#regeneratePerspectives').onclick = () => { void generatePerspectiveMap({ regenerate: true }); };
+resultsEl.addEventListener('click', event => {
+  const tab = event.target.closest('[data-section-mode]');
+  if (tab){ showSectionMode(tab.dataset.section, tab.dataset.sectionMode); return; }
+  const link = event.target.closest('[data-high-section]');
+  if (link){ event.preventDefault(); showSectionMode(link.dataset.highSection, 'high'); return; }
+  if (event.target.closest('[data-generate-memes]')) void generateMemes({ regenerate: true });
+  if (event.target.closest('[data-generate-perspectives]')) void generatePerspectiveMap({ regenerate: true });
+});
+resultsEl.addEventListener('keydown', event => {
+  const tab = event.target.closest('[data-section-mode]');
+  if (!tab) return;
+  let mode;
+  const modes = sectionViewModes(tab.dataset.section);
+  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft'){
+    const step = event.key === 'ArrowRight' ? 1 : -1;
+    mode = modes[(modes.indexOf(tab.dataset.sectionMode) + step + modes.length) % modes.length];
+  }
+  else if (event.key === 'Home') mode = 'high';
+  else if (event.key === 'End') mode = 'low';
+  else return;
+  event.preventDefault(); showSectionMode(tab.dataset.section, mode);
+  $('#' + tab.dataset.section + '-tab-' + mode).focus();
+});
+saveResultsBtn.onclick = () => {
+  if (!latestResults) return;
+  const { llm_analysis, ...results } = latestResults;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(results, null, 2) + '\n'], {type:'application/json'}));
+  const link = document.createElement('a');
+  link.href = url; link.download = 'results.json'; document.body.appendChild(link); link.click(); link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
 
 function parseResultsFile(text){
   const invalid = () => { throw new Error('This file does not contain readable ClearFrame results. Choose results.json or a saved ClearFrame run.'); };
@@ -415,12 +678,16 @@ function parseResultsFile(text){
       articles.push({ ...article, role: 'comparison' });
     });
   }
-  return {
+  const normalized = {
     summary: readText(content.summary), structural_note: readText(content.structural_note),
     stop_reason: readText(rawRun ? data.stop_reason : content.stop_reason), categories,
     summary_supporting_articles: readList(content.summary_supporting_articles).map(readArticle),
     analysis_articles: articles,
   };
+  // Preserve optional meme data; the catalog validator checks it before rendering.
+  if (Object.hasOwn(data, 'meme_view')) normalized.meme_view = data.meme_view;
+  if (Object.hasOwn(data, 'perspective_map')) normalized.perspective_map = data.perspective_map;
+  return normalized;
 }
 
 async function importResultsFile(file){
@@ -529,9 +796,14 @@ function showRunError(message){
   analysisEl.innerHTML = '<p class="empty">There are no notes for this comparison.</p>';
 }
 
-function handleMsg(msg){
+function handleMsg(msg, apiKey){
   if (msg.type === "line") appendLine(msg.text);
-  else if (msg.type === "result"){ renderResults(msg.data); renderAnalysis(msg.data); showTab("results"); setStatus("ok", "Done. Your results are ready."); }
+  else if (msg.type === "result"){
+    renderResults(msg.data); renderAnalysis(msg.data); showTab("results");
+    setStatus("ok", "Done. Your results are ready.");
+    if (apiKey) void generateMemes({ apiKey });
+    if (apiKey) void generatePerspectiveMap({ apiKey });
+  }
   else if (msg.type === "error"){ appendLine("ERROR: " + msg.text); showRunError(msg.text); }
   else if (msg.type === "done"){
     if (dot.className.indexOf("err") === -1 && dot.className.indexOf("ok") === -1) setStatus("ok", "Finished.");
@@ -563,7 +835,16 @@ async function streamRun(url, apiKey){
         .filter(l => l.startsWith("data:"))
         .map(l => l.slice(5).trim())
         .join("");
-      if (data) handleMsg(JSON.parse(data));
+      if (data){
+        const message = JSON.parse(data);
+        handleMsg(message, apiKey);
+        // The server may keep the HTTP connection alive after its final event.
+        if (message.type === 'done'){
+          await reader.cancel();
+          reader.releaseLock();
+          return;
+        }
+      }
     }
   }
 }
@@ -578,6 +859,14 @@ $("#form").addEventListener("submit", async e => {
 
   // A new run takes precedence over a file still being read.
   runGeneration += 1;
+  if (perspectiveController) perspectiveController.abort();
+  perspectiveController = null; perspectiveVersion += 1;
+  perspectiveState = 'idle'; perspectiveError = '';
+  globalThis.ClearFramePerspectives?.clear();
+  if (memeController) memeController.abort();
+  memeRenderVersion += 1;
+  memeState = 'idle'; memeError = '';
+  sectionModes.clear(); renderedMemes.clear();
   importStatus.hidden = true;
   resultsFileInput.value = '';
   try {
@@ -587,6 +876,9 @@ $("#form").addEventListener("submit", async e => {
 
   consoleEl.innerHTML = ""; resultsEl.innerHTML = ""; analysisEl.innerHTML = ""; rawLog = "";
   latestResults = null;
+  saveResultsBtn.disabled = true;
+  $("#regenerateMemes").hidden = true;
+  $('#regeneratePerspectives').hidden = true;
   copyResultsBtn.disabled = true;
   printResultsBtn.disabled = true;
   resultsEl.innerHTML = '<div class="view-heading"><p class="eyebrow">Comparison in progress</p><h1>Looking at other articles.</h1>' +

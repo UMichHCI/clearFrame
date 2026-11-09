@@ -32,7 +32,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import pandas as pd
+from openai import OpenAI
 
+from clearframe.memes import generate_meme_view, prepare_meme_input
+from clearframe.perspectives import generate_perspective_map
 from clearframe.prompts import CATEGORY_PLAIN_LABELS
 from clearframe.report import REPORT_PATH, write_results_html
 from run import run_clearframe_pipeline
@@ -271,7 +274,10 @@ def stream_pipeline(url: str, api_key: str, sink: "queue.Queue[dict]") -> None:
         sink.put({"type": "error", "text": holder["error"]})
     else:
         result_summary = _summarize_result(holder.get("result", {}))
-        _write_results_json(result_summary)
+        try:
+            _write_results_json(result_summary)
+        except OSError:
+            sink.put({"type": "line", "text": "Could not save a local copy. Your results are still available in this page."})
         sink.put({"type": "result", "data": result_summary})
 
     sink.put({"type": "done"})
@@ -328,6 +334,19 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/run":
             self._handle_run(self._read_json_body())
+        elif parsed.path in {"/memes", "/perspectives"}:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if length > 1_000_000:
+                self._send_json({"error": "This results file is too large to generate a view."}, 413)
+            else:
+                body = self._read_json_body()
+                if parsed.path == "/perspectives":
+                    self._handle_perspectives(body)
+                else:
+                    self._handle_memes(body)
         else:
             self.send_error(404, "Not found")
 
@@ -345,7 +364,8 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            return body if isinstance(body, dict) else {}
         except Exception:
             return {}
 
@@ -385,6 +405,50 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _send_json(self, data, status=200):
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _handle_memes(self, body):
+        api_key = body.get("api_key")
+        if not isinstance(api_key, str) or not api_key.strip():
+            self._send_json({"error": "Enter your OpenAI key to make memes."}, 400)
+            return
+        data = body.get("results")
+        try:
+            prepared = prepare_meme_input(data)
+            if not prepared["items"]:
+                raise ValueError("This comparison has no summaries to turn into memes.")
+        except ValueError as error:
+            self._send_json({"error": str(error)}, 400)
+            return
+        try:
+            with OpenAI(api_key=api_key.strip(), timeout=90, max_retries=0) as client:
+                view = generate_meme_view(data, client)
+        except Exception:
+            # Upstream exceptions can contain credentials or request details.
+            self._send_json({"error": "Could not make memes. Check your OpenAI key and account, then try again. Your full results are still available."}, 502)
+            return
+        self._send_json({"meme_view": view})
+
+    def _handle_perspectives(self, body):
+        api_key = body.get("api_key")
+        if not isinstance(api_key, str) or not api_key.strip():
+            self._send_json({"error": "Enter your OpenAI key to make a perspective map."}, 400)
+            return
+        try:
+            with OpenAI(api_key=api_key.strip(), timeout=90, max_retries=0) as client:
+                perspective_map = generate_perspective_map(body.get("results") or {}, client)
+        except Exception:
+            self._send_json({"error": "Could not make the perspective map. Check your connection and OpenAI key, then try again. Your full results are still available."}, 502)
+            return
+        self._send_json({"perspective_map": perspective_map})
 
     def _sse(self, event: dict):
         payload = f"data: {json.dumps(event)}\n\n".encode("utf-8")

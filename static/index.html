@@ -49,7 +49,10 @@
         <button id="tabAnalysis" role="tab" aria-selected="false" aria-controls="analysis" tabindex="-1">Details<span class="count" id="analysisCount"></span></button>
       </div>
       <div class="toolbar" id="resultsTools">
-        <button id="copyResults" disabled>Copy for Google Docs</button>
+        <button id="copyResults" disabled title="Copies all full explanations and linked sources for Google Docs">Copy full text</button>
+        <button id="saveResults" disabled>Save results</button>
+        <button id="regenerateMemes" hidden title="Makes a new set using your OpenAI account">Regenerate memes</button>
+        <button id="regeneratePerspectives" hidden title="Makes a new perspective map using your OpenAI account">Regenerate map</button>
         <button id="printResults" disabled>Print / PDF</button>
       </div>
     </nav>
@@ -70,6 +73,10 @@
   </main>
 </div>
 <footer class="app-footer"><span>ClearFrame</span><p>Read beyond the frame.</p></footer>
+<script src="/static/memes.js"></script>
+<script src="/static/comic.js"></script>
+<script src="/static/world-map.js"></script>
+<script src="/static/perspectives.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

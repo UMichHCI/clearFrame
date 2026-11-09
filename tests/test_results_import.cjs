@@ -6,22 +6,24 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8');
 
-function createPage() {
+function createPage(overrides = {}) {
   const nodes = new Map();
   const node = selector => {
     if (!nodes.has(selector)) nodes.set(selector, {
-      value: '', textContent: '', innerHTML: '', disabled: false, hidden: false,
+      value: '', textContent: '', innerHTML: '', className: '', disabled: false, hidden: false,
       style: {}, dataset: {}, classList: { toggle() {} },
       addEventListener() {}, setAttribute() {}, focus() {},
     });
     return nodes.get(selector);
   };
   const context = vm.createContext({
-    URL,
+    URL, AbortController, TextDecoder,
     document: { querySelector: node },
     localStorage: { getItem() { throw new Error('Storage unavailable'); } },
     fetch() { throw new Error('Opening results must not make network requests'); },
+    ...overrides,
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/memes.js'), 'utf8'), context);
   vm.runInContext(source, context);
   return { context, node, evaluate: code => vm.runInContext(code, context) };
 }
@@ -147,4 +149,178 @@ test('a file cannot overwrite an active or newly started comparison', async () =
   finishReading(JSON.stringify(snapshot));
   await pending;
   assert.equal(node('#results').innerHTML, 'New comparison in progress');
+});
+
+const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, '../static/meme-templates/catalog.json'), 'utf8'));
+const memeView = () => ({ version: 1, items: ['overview', 'finding-1'].map(id => ({
+  id, template_id: 'drake', captions: { rejected: 'The missing context', preferred: 'The familiar explanation' },
+  sentence: 'The article gives one explanation more attention.', alt_text: 'Drake prefers the familiar explanation.',
+})) });
+
+function mockRenderer(context) {
+  context.ClearFrameMemes.catalog = async () => catalog;
+  context.ClearFrameMemes.render = async () => 'data:image/png;base64,test';
+}
+
+test('template validation rejects arbitrary images, mismatched cards, and overflowing captions', () => {
+  const { context } = createPage();
+  assert.equal(context.ClearFrameMemes.validate(memeView(), snapshot, catalog.templates).items.length, 2);
+  const invalid = [
+    { ...memeView(), version: 3 }, { ...memeView(), items: [] },
+    { ...memeView(), items: [memeView().items[0], memeView().items[0]] },
+  ];
+  const unknown = memeView(); unknown.items[0].template_id = 'https://untrusted.example/image.png'; invalid.push(unknown);
+  const long = memeView(); long.items[0].captions.rejected = 'a '.repeat(20); invalid.push(long);
+  const wrong = memeView(); wrong.items[0].captions = { wrong: 'slot' }; invalid.push(wrong);
+  for (const view of invalid) assert.throws(() => context.ClearFrameMemes.validate(view, snapshot, catalog.templates));
+});
+
+test('saved meme cards reopen without an LLM call and leave the full explanation available', async () => {
+  const { context, node, evaluate } = createPage();
+  mockRenderer(context);
+  await context.importResultsFile(file({ ...snapshot, meme_view: memeView() }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(evaluate('memeState'), 'ready');
+  assert.match(node('#overview-meme').innerHTML, /data:image\/png/);
+  assert.match(node('#finding-1-meme').innerHTML, /The article gives one explanation/);
+  assert.equal(evaluate('sectionModes.get("overview")'), 'high');
+  context.showSectionMode('overview', 'low');
+  assert.equal(node('#overview-high').hidden, true);
+  assert.equal(node('#overview-low').hidden, false);
+  assert.equal(evaluate('sectionModes.get("finding-1")'), 'high');
+  assert.equal(node('#printResults').disabled, false);
+  context.showSectionMode('overview', 'high');
+  assert.match(node('#results').innerHTML, /A comparison summary/);
+  assert.equal(evaluate('JSON.stringify(latestResults.meme_view.items).includes("data:image")'), false);
+});
+
+test('new cards have short sentences and expanded dialogue while older saved captions still open', () => {
+  const { context } = createPage();
+  const validate = view => context.ClearFrameMemes.validate(view, snapshot, catalog.templates);
+  const legacy = memeView();
+  legacy.items[0].template_id = 'spiderman';
+  legacy.items[0].captions = { left: 'Your server did it.', right: 'Your update did it.' };
+  legacy.items[0].sentence = 'word '.repeat(30).trim();
+  assert.equal(validate(legacy).version, 1);
+  const modern = JSON.parse(JSON.stringify(legacy)); modern.version = 2;
+  modern.items[0].captions.left_actor = 'App company'; modern.items[0].captions.right_actor = 'City hall';
+  modern.items[0].sentence = 'The two sides blame each other.';
+  assert.equal(validate(modern).version, 2);
+  modern.items[0].sentence = 'word '.repeat(21).trim();
+  assert.throws(() => validate(modern));
+});
+
+test('regeneration requests fresh captions instead of redisplaying the saved set', async () => {
+  let calls = 0;
+  const { context, evaluate } = createPage({ fetch: async () => {
+    calls++; return { ok: true, json: async () => ({ meme_view: { ...memeView(), version: 2 } }) };
+  } });
+  mockRenderer(context);
+  await context.importResultsFile(file({ ...snapshot, meme_view: memeView() }));
+  await new Promise(resolve => setImmediate(resolve));
+  await context.generateMemes({ apiKey: 'key', regenerate: true });
+  assert.equal(calls, 1);
+  assert.equal(evaluate('latestResults.meme_view.version'), 2);
+});
+
+test('invalid saved memes preserve the full results and allow a fresh generation', async () => {
+  const { context, node, evaluate } = createPage();
+  mockRenderer(context);
+  await context.importResultsFile(file({ ...snapshot, meme_view: { version: 1, items: [] } }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(evaluate('memeState'), 'error');
+  assert.match(node('#results').innerHTML, /A comparison summary/);
+  assert.equal(evaluate('latestResults.meme_view'), undefined);
+  assert.equal(node('#overview-generate-memes').disabled, false);
+});
+
+test('generation sends analysis text only and independent section tabs make no extra calls', async () => {
+  const calls = [];
+  const { context, node } = createPage({ fetch: async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, json: async () => ({ meme_view: memeView() }) };
+  } });
+  mockRenderer(context);
+  await context.importResultsFile(file({ ...snapshot, llm_analysis: { private: 'raw details' } }));
+  await context.generateMemes({ apiKey: 'visitor-key' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/memes');
+  assert.equal(calls[0].body.api_key, 'visitor-key');
+  assert.equal(calls[0].body.results.summary, snapshot.summary);
+  assert.equal(calls[0].body.results.llm_analysis, undefined);
+  assert.equal(calls[0].body.results.analysis_articles, undefined);
+  assert.doesNotMatch(JSON.stringify(calls[0].body), /data:image|\.jpg|raw details/);
+  context.showSectionMode('overview', 'low'); context.showSectionMode('finding-1', 'low'); context.showSectionMode('overview', 'high');
+  assert.equal(node('#overview-high').hidden, false);
+  assert.equal(node('#finding-1-low').hidden, false);
+  await context.generateMemes({ apiKey: 'visitor-key' });
+  assert.equal(calls.length, 1);
+  assert.equal(node('#overview-generate-memes').disabled, false);
+});
+
+test('generation failures and missing keys keep full results readable', async () => {
+  let calls = 0;
+  const { context, node, evaluate } = createPage({ fetch: async () => {
+    calls++; return { ok: false, json: async () => ({ error: 'Unavailable' }) };
+  } });
+  await context.importResultsFile(file(snapshot));
+  await context.generateMemes();
+  assert.equal(calls, 0);
+  assert.match(node('#overview-meme-status').textContent, /Enter your OpenAI key/);
+  await context.generateMemes({ apiKey: 'key' });
+  assert.equal(calls, 1);
+  assert.equal(evaluate('memeState'), 'error');
+  assert.match(node('#results').innerHTML, /A comparison summary/);
+});
+
+test('a late generation cannot overwrite a newly uploaded comparison', async () => {
+  let finish;
+  const { context, node, evaluate } = createPage({ fetch: () => new Promise(resolve => { finish = resolve; }) });
+  mockRenderer(context);
+  await context.importResultsFile(file(snapshot));
+  const pending = context.generateMemes({ apiKey: 'key' });
+  await context.importResultsFile(file({ ...snapshot, summary: 'New comparison' }, 'new.json'));
+  finish({ ok: true, json: async () => ({ meme_view: memeView() }) });
+  await pending;
+  assert.match(node('#results').innerHTML, /New comparison/);
+  assert.equal(evaluate('latestResults.meme_view'), undefined);
+  assert.equal(evaluate('renderedMemes.size'), 0);
+});
+
+test('section choices survive asynchronous meme loading and navigation between main views', async () => {
+  let finish;
+  const { context, node, evaluate } = createPage({ fetch: () => new Promise(resolve => { finish = resolve; }) });
+  mockRenderer(context);
+  await context.importResultsFile(file(snapshot));
+  context.showSectionMode('overview', 'low');
+  const pending = context.generateMemes({ apiKey: 'key' });
+  context.showSectionMode('finding-1', 'low');
+  context.showSectionMode('overview', 'high');
+  context.showTab('console');
+  finish({ ok: true, json: async () => ({ meme_view: memeView() }) });
+  await pending;
+  context.showTab('results');
+  assert.equal(evaluate('sectionModes.get("overview")'), 'high');
+  assert.equal(evaluate('sectionModes.get("finding-1")'), 'low');
+  assert.equal(node('#overview-high').hidden, false);
+  assert.equal(node('#finding-1-low').hidden, false);
+  assert.equal(node('#finding-1-meme-controls').hidden, true);
+  assert.equal(node('#printResults').disabled, false);
+});
+
+test('a completed SSE run releases its reader without waiting for the connection to close', async () => {
+  let cancelled = false, released = false, readCount = 0;
+  const chunk = new TextEncoder().encode('data: {"type":"done"}\n\n');
+  const { context } = createPage({ fetch: async () => ({ ok: true, body: { getReader: () => ({
+    read: async () => {
+      readCount++;
+      if (readCount > 1) throw new Error('The stream should finish at its done event');
+      return { value: chunk, done: false };
+    },
+    cancel: async () => { cancelled = true; }, releaseLock: () => { released = true; },
+  }) } }) });
+  await context.streamRun('https://source.example/story', 'key');
+  assert.equal(readCount, 1);
+  assert.equal(cancelled, true);
+  assert.equal(released, true);
 });
