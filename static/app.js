@@ -8,7 +8,25 @@ const consoleEl = $("#console"), resultsEl = $("#results"), analysisEl = $("#ana
 const dot = $("#dot"), statusText = $("#statusText"), goBtn = $("#go");
 const keyEl = $("#apiKey"), rememberEl = $("#remember");
 const copyResultsBtn = $("#copyResults");
+const printResultsBtn = $("#printResults");
+const resultsFileInput = $("#resultsFile");
+const importStatus = $("#importStatus");
 let running = false, rawLog = "", latestResults = null;
+let runGeneration = 0;
+
+const CATEGORY_TITLES = {
+  worthy_unworthy_victims: "Whose suffering gets attention",
+  agency_attribution: "Who gets blamed",
+  presuppositions_doctrine: "What goes unquestioned",
+  selective_criteria: "How actions are judged",
+  suppressed_alternative: "What other explanations are missing",
+  smoke_and_discrepancies: "Distractions and conflicting facts",
+};
+
+function categoryTitle(category){
+  return (Object.hasOwn(CATEGORY_TITLES, category.key) ? CATEGORY_TITLES[category.key] : '') ||
+    category.label || labelCategory(category.key) || "Difference";
+}
 
 const CATEGORY_DESCRIPTIONS = {
   worthy_unworthy_victims: "Whose harm gets explained, and whose gets less attention.",
@@ -21,7 +39,8 @@ const CATEGORY_DESCRIPTIONS = {
 
 // Restore a remembered key from this browser (opt-in only).
 const KEY_STORE = "clearframe.openai_key";
-const savedKey = localStorage.getItem(KEY_STORE);
+let savedKey = null;
+try { savedKey = localStorage.getItem(KEY_STORE); } catch (_err) { /* Storage may be blocked. */ }
 if (savedKey){ keyEl.value = savedKey; rememberEl.checked = true; }
 
 // Tabs
@@ -29,18 +48,34 @@ function showTab(which){
   const con = which === "console";
   const res = which === "results";
   const ana = which === "analysis";
-  $("#tabConsole").classList.toggle("active", con);
-  $("#tabResults").classList.toggle("active", res);
-  $("#tabAnalysis").classList.toggle("active", ana);
-  consoleEl.style.display = con ? "" : "none";
-  $("#consoleTools").style.display = con ? "" : "none";
+  [["#tabConsole", con], ["#tabResults", res], ["#tabAnalysis", ana]].forEach(([id, selected]) => {
+    $(id).classList.toggle("active", selected);
+    $(id).setAttribute("aria-selected", String(selected));
+    $(id).tabIndex = selected ? 0 : -1;
+  });
+  $("#consoleView").style.display = con ? "" : "none";
   $("#resultsTools").style.display = res ? "" : "none";
+  $("#resultsImport").style.display = res ? "" : "none";
   resultsEl.style.display = res ? "" : "none";
   analysisEl.style.display = ana ? "" : "none";
 }
 $("#tabConsole").onclick = () => showTab("console");
 $("#tabResults").onclick = () => showTab("results");
 $("#tabAnalysis").onclick = () => showTab("analysis");
+const viewTabs = [["#tabResults", "results"], ["#tabConsole", "console"], ["#tabAnalysis", "analysis"]];
+viewTabs.forEach(([id], index) => {
+  $(id).addEventListener("keydown", event => {
+    let next;
+    if (event.key === "ArrowRight") next = (index + 1) % viewTabs.length;
+    else if (event.key === "ArrowLeft") next = (index + viewTabs.length - 1) % viewTabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = viewTabs.length - 1;
+    else return;
+    event.preventDefault();
+    showTab(viewTabs[next][1]);
+    $(viewTabs[next][0]).focus();
+  });
+});
 
 function setStatus(cls, text){ dot.className = "dot " + cls; statusText.textContent = text; }
 $("#clearLog").onclick = () => { consoleEl.innerHTML = ""; rawLog = ""; };
@@ -107,7 +142,7 @@ function resultsAsPlainText(data){
   if (categories.length) lines.push("", "Findings explained");
   else lines.push("", "The comparison did not find clear evidence of an important difference in how these articles explain the story.");
   categories.forEach(category => {
-    lines.push("", category.label || category.key || "Category");
+    lines.push("", categoryTitle(category));
     const description = CATEGORY_DESCRIPTIONS[category.key];
     if (description) lines.push(description);
     lines.push(category.paragraph || "");
@@ -156,7 +191,7 @@ function resultsAsHtml(data){
   if (categories.length) parts.push("<h2>Findings explained</h2>");
   else parts.push("<p>The comparison did not find clear evidence of an important difference in how these articles explain the story.</p>");
   categories.forEach(category => {
-    parts.push("<h3>" + escapeHtml(category.label || category.key || "Category") + "</h3>");
+    parts.push("<h3>" + escapeHtml(categoryTitle(category)) + "</h3>");
     const description = CATEGORY_DESCRIPTIONS[category.key];
     if (description) parts.push("<p><em>" + escapeHtml(description) + "</em></p>");
     parts.push("<p>" + textAsHtml(category.paragraph || "") + "</p>");
@@ -193,6 +228,7 @@ async function copyResults(){
 }
 
 copyResultsBtn.onclick = copyResults;
+printResultsBtn.onclick = () => { if (latestResults) window.print(); };
 
 // Colorize a terminal line by its recognizable prefixes/markers.
 function classify(line){
@@ -218,95 +254,213 @@ function appendLine(text){
   if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
+function articleLink(article){
+  const title = escapeHtml(article.title || "Untitled article");
+  const url = safeHttpUrl(article.url || "");
+  return url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title;
+}
+
+function reportArticles(articles){
+  return '<ul class="article-list">' + articles.map(article => {
+    const metadata = [article.source_country, article.outlet].filter(Boolean).join(" / ");
+    const number = article.citation_id ? '[' + escapeHtml(String(article.citation_id)) + '] ' : '';
+    return '<li>' + number + articleLink(article) +
+      (metadata ? '<span class="article-meta">' + escapeHtml(metadata) + '</span>' : '') + '</li>';
+  }).join('') + '</ul>';
+}
+
+function reportReferences(articles){
+  if (!articles.length) return '';
+  return '<div class="references"><h4>Supporting articles</h4>' + reportArticles(articles) + '</div>';
+}
+
+function findingAsHtml(paragraph){
+  const text = String(paragraph || '');
+  const split = text.search(/(?<=[.!?])\s+(?=[A-Z])/);
+  if (split === -1) return '<strong>' + textAsHtml(text) + '</strong>';
+  return '<strong>' + textAsHtml(text.slice(0, split)) + '</strong>' + textAsHtml(text.slice(split));
+}
+
 function renderResults(data){
   latestResults = data;
   copyResultsBtn.disabled = false;
+  printResultsBtn.disabled = false;
   const cats = data.categories || [];
-  $("#resCount").textContent = cats.length ? "(" + cats.length + ")" : "";
-  let html = "";
+  const articles = data.analysis_articles || [];
+  const source = articles.find(article => article.role === 'source');
+  const comparisons = articles.filter(article => article.role !== 'source');
+  const countries = new Set(articles.map(article => article.source_country).filter(Boolean));
+  $("#resCount").textContent = cats.length ? String(cats.length) : '';
+  let html = '<article class="report"><header class="report-heading"><p class="eyebrow">Your article</p>' +
+    '<h1>' + (source ? articleLink(source) : 'Your article comparison') + '</h1>';
+  if (source){
+    const metadata = [source.source_country, source.outlet].filter(Boolean).join(' / ');
+    html += '<p class="source-meta">' + escapeHtml(metadata) + '</p>';
+  }
+  html += '</header><div class="report-scope" aria-label="Comparison scope">' +
+    '<div><strong>' + comparisons.length + '</strong><span>other articles</span></div>' +
+    '<div><strong>' + countries.size + '</strong><span>countries</span></div>' +
+    '<div><strong>' + cats.length + '</strong><span>differences</span></div></div>';
   if (data.stop_reason){
-    html += '<div class="stop-reason"><h3>Analysis stopped</h3>' +
-      escapeHtml(data.stop_reason) + '</div>';
+    html += '<section class="stop-reason"><h2>Comparison stopped</h2><p>' + textAsHtml(data.stop_reason) + '</p></section>';
   }
   if (data.summary){
-    const summaryRefs = data.summary_supporting_articles || [];
-    html += '<div class="synth"><h3>Summary</h3>' + summaryAsHtml(data.summary, summaryRefs);
-    if (summaryRefs.length){
-      html += '<div class="meta" style="margin-top:10px">References</div>';
-      summaryRefs.forEach(a => {
-        const title = a.title || "Untitled";
-        const country = a.source_country || a.outlet || "";
-        const url = safeHttpUrl(a.url || "");
-        const number = a.citation_id ? "[" + escapeHtml(String(a.citation_id)) + "] " : "";
-        html += '<div style="margin-top:6px">' +
-          number +
-          (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
-          (country ? ' <span class="meta">(' + escapeHtml(country) + ')</span>' : '') +
-          '</div>';
-      });
-    }
-    html += '</div>';
+    const refs = data.summary_supporting_articles || [];
+    html += '<section class="overview" aria-labelledby="overviewHeading"><h2 id="overviewHeading">What we found</h2>' +
+      summaryAsHtml(data.summary, refs) + reportReferences(refs) + '</section>';
   }
-  if (data.structural_note){
-    html += '<div class="note">' + escapeHtml(data.structural_note) + '</div>';
-  }
-  if (!cats.length){
-    html += '<div class="empty">The comparison did not find clear evidence of an important difference in how these articles explain the story.</div>';
-  } else {
-    html += '<details class="category-details"><summary>Findings explained</summary><div class="details-body">';
-    cats.forEach(c => {
-      const refs = c.supporting_articles || [];
-      const description = CATEGORY_DESCRIPTIONS[c.key];
-      html += '<div class="card"><div class="top">' +
-        '<div><div class="title">' + escapeHtml(c.label || c.key || "Category") + '</div>' +
-        (description ? '<div class="category-description">' + escapeHtml(description) + '</div>' : '') + '</div>' +
-        '</div>' +
-        '<div class="why">' + escapeHtml(c.paragraph) + '</div>';
-      if (refs.length){
-        html += '<div class="meta" style="margin-top:10px">References</div>';
-        refs.forEach(a => {
-          const title = a.title || "Untitled";
-          const outlet = a.outlet || "";
-          const url = safeHttpUrl(a.url || "");
-          html += '<div style="margin-top:6px">' +
-            (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
-            (outlet ? ' <span class="meta">(' + escapeHtml(outlet) + ')</span>' : '') +
-            '</div>';
-        });
-      }
-      html += '</div>';
+  if (cats.length){
+    html += '<nav class="report-contents" aria-label="Findings in this comparison"><h2>In this comparison</h2><ol>';
+    cats.forEach((category, index) => {
+      html += '<li><a href="#finding-' + (index + 1) + '"><span class="index">' + String(index + 1).padStart(2, '0') +
+        '</span>' + escapeHtml(categoryTitle(category)) + '</a></li>';
     });
-    html += '</div></details>';
+    html += '</ol></nav>';
   }
-  const analysisArticles = data.analysis_articles || [];
-  if (analysisArticles.length){
-    html += '<section class="used-articles"><h3>Articles compared</h3>' +
-      '<div class="meta">Your article and the other articles compared with it.</div>';
-    groupArticlesByCountry(analysisArticles).forEach((countryArticles, country) => {
-      html += '<div class="country-group"><h4>' + escapeHtml(country) + '</h4><ul>';
-      countryArticles.forEach(article => {
-        const title = article.title || "Untitled";
-        const outlet = article.outlet || "";
-        const url = safeHttpUrl(article.url || "");
-        const sourceTag = article.role === "source"
-          ? '<span class="article-role">Your article</span>' : '';
-        html += '<li>' + sourceTag +
-          (url ? '<a href="' + escapeAttribute(url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a>' : escapeHtml(title)) +
-          (outlet ? ' <span class="meta">(' + escapeHtml(outlet) + ')</span>' : '') + '</li>';
-      });
-      html += '</ul></div>';
+  html += '<section class="findings" aria-labelledby="findingsHeading"><h2 id="findingsHeading">How the articles differ</h2>';
+  if (!cats.length){
+    html += '<p class="empty">' + (data.stop_reason ? 'There are no results for this comparison.' :
+      'We did not find any clear, important differences in how these articles explain the story.') + '</p>';
+  }
+  cats.forEach((category, index) => {
+    const number = index + 1;
+    const description = CATEGORY_DESCRIPTIONS[category.key];
+    html += '<section class="finding" id="finding-' + number + '" aria-labelledby="findingHeading-' + number + '">' +
+      '<div class="finding-heading"><span class="finding-number">' + String(number).padStart(2, '0') + '</span>' +
+      '<h3 id="findingHeading-' + number + '">' + escapeHtml(categoryTitle(category)) + '</h3></div>' +
+      (description ? '<p class="finding-description">' + escapeHtml(description) + '</p>' : '') +
+      '<p class="finding-body">' + findingAsHtml(category.paragraph) + '</p>' +
+      reportReferences(category.supporting_articles || []) + '</section>';
+  });
+  html += '</section>';
+  if (comparisons.length){
+    html += '<section class="article-library"><h2>Articles compared</h2>' +
+      '<p class="section-note">Other articles about this story, grouped by country. Some helped explain a difference; others did not.</p>';
+    const groups = [...groupArticlesByCountry(comparisons)].sort(([a], [b]) => a.localeCompare(b));
+    groups.forEach(([country, countryArticles]) => {
+      html += '<details class="country"><summary>' + escapeHtml(country) + ' <span>(' + countryArticles.length + ')</span></summary>' +
+        reportArticles(countryArticles) + '</details>';
     });
     html += '</section>';
   }
-  resultsEl.innerHTML = html;
+  if (data.structural_note){
+    html += '<footer class="report-note">' + textAsHtml(data.structural_note) + '</footer>';
+  }
+  resultsEl.innerHTML = html + '</article>';
 }
+
+function parseResultsFile(text){
+  const invalid = () => { throw new Error('This file does not contain readable ClearFrame results. Choose results.json or a saved ClearFrame run.'); };
+  const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const readText = value => {
+    if (value == null) return '';
+    if (typeof value !== 'string') invalid();
+    return value;
+  };
+  const readList = value => {
+    if (value == null) return [];
+    if (!Array.isArray(value)) invalid();
+    return value;
+  };
+  const readArticle = article => {
+    if (!isObject(article)) invalid();
+    const citation = article.citation_id;
+    if (citation != null && typeof citation !== 'string' && typeof citation !== 'number') invalid();
+    return {
+      title: readText(article.title), url: readText(article.url),
+      outlet: readText(article.outlet), source_country: readText(article.source_country),
+      role: readText(article.role), citation_id: citation ?? '',
+    };
+  };
+  let data;
+  try { data = JSON.parse(text.replace(/^\uFEFF/, '')); }
+  catch (_err) { throw new Error('This file could not be read. Choose a valid .json results file.'); }
+  if (!isObject(data)) invalid();
+  const rawRun = Object.hasOwn(data, 'synthesis');
+  const content = rawRun ? data.synthesis : data;
+  if (!isObject(content) || !['summary', 'categories', 'stop_reason', 'analysis_articles'].some(key => Object.hasOwn(content, key))) invalid();
+  const categoryData = content.categories ?? [];
+  let entries;
+  if (Array.isArray(categoryData)) entries = categoryData.map(category => ['', category]);
+  else if (isObject(categoryData)) entries = Object.entries(categoryData);
+  else invalid();
+  const categories = entries.map(([key, category]) => {
+    if (!isObject(category) || typeof category.paragraph !== 'string') invalid();
+    return {
+      key: readText(category.key ?? key), label: readText(category.label),
+      paragraph: category.paragraph,
+      supporting_articles: readList(category.supporting_articles).map(readArticle),
+    };
+  });
+  let articles = readList(content.analysis_articles).map(readArticle);
+  if (rawRun){
+    const plan = data.plan ?? {};
+    if (!isObject(plan)) invalid();
+    articles = [];
+    const sourceUrl = readText(data.source_url);
+    if (sourceUrl){
+      articles.push(readArticle({
+        title: readText(data.source_title) || 'Your article', url: sourceUrl,
+        source_country: readText(plan.original_source_country), role: 'source',
+      }));
+    }
+    const seen = new Set(articles.map(article => article.url));
+    readList(data.pair_analyses).forEach(pair => {
+      if (!isObject(pair)) invalid();
+      if (pair.article_reference == null) return;
+      const article = readArticle(pair.article_reference);
+      const identity = article.url || [article.title, article.outlet].filter(Boolean).join('|');
+      if (!identity || seen.has(identity)) return;
+      seen.add(identity);
+      articles.push({ ...article, role: 'comparison' });
+    });
+  }
+  return {
+    summary: readText(content.summary), structural_note: readText(content.structural_note),
+    stop_reason: readText(rawRun ? data.stop_reason : content.stop_reason), categories,
+    summary_supporting_articles: readList(content.summary_supporting_articles).map(readArticle),
+    analysis_articles: articles,
+  };
+}
+
+async function importResultsFile(file){
+  if (!file) return;
+  importStatus.hidden = false;
+  importStatus.dataset.state = '';
+  if (running){
+    importStatus.textContent = 'Wait for the current comparison to finish before opening a file.';
+    resultsFileInput.value = '';
+    return;
+  }
+  const generation = ++runGeneration;
+  importStatus.textContent = 'Opening ' + file.name + '...';
+  try {
+    if (!/\.json$/i.test(file.name)) throw new Error('Choose a .json file, such as results.json or a saved ClearFrame run.');
+    if (file.size > 20 * 1024 * 1024) throw new Error('Choose a results file smaller than 20 MB.');
+    const text = await file.text();
+    if (generation !== runGeneration || running) return;
+    const data = parseResultsFile(text);
+    renderResults(data);
+    showTab('results');
+    importStatus.textContent = 'Opened ' + file.name + '. These results are only loaded in this page.';
+  } catch (err) {
+    if (generation !== runGeneration || running) return;
+    importStatus.dataset.state = 'error';
+    importStatus.textContent = err.message || 'This file could not be opened. Try another saved results file.';
+  } finally {
+    if (generation === runGeneration) resultsFileInput.value = '';
+  }
+}
+
+resultsFileInput.addEventListener('change', () => importResultsFile(resultsFileInput.files[0]));
 
 function renderAnalysis(data){
   const analysis = data.llm_analysis || {};
   const pairs = analysis.pair_extractions || [];
   $("#analysisCount").textContent = pairs.length ? "(" + pairs.length + ")" : "";
 
-  let html = "";
+  let html = '<div class="view-heading"><p class="eyebrow">Behind the comparison</p><h1>A closer look</h1>' +
+    '<p>The notes behind your results.</p></div>';
   html += analysisSection("Source Article Extraction", renderJsonBlock(analysis.source_extraction || {}));
   html += analysisSection("Pair Extractions", renderPairs(pairs));
   html += analysisSection("Final Synthesis", renderJsonBlock(analysis.category_synthesis || {}));
@@ -367,10 +521,18 @@ function textAsHtml(s){
 }
 
 // Dispatch a single decoded SSE event to the right renderer.
+function showRunError(message){
+  setStatus("err", "Comparison failed. See Progress for details.");
+  resultsEl.innerHTML = '<div class="view-heading"><p class="eyebrow">Comparison interrupted</p>' +
+    '<h1>We could not complete this comparison.</h1><p>' + escapeHtml(message) + '</p>' +
+    '<p>Check Progress for details, or try another article.</p></div>';
+  analysisEl.innerHTML = '<p class="empty">There are no notes for this comparison.</p>';
+}
+
 function handleMsg(msg){
   if (msg.type === "line") appendLine(msg.text);
   else if (msg.type === "result"){ renderResults(msg.data); renderAnalysis(msg.data); showTab("results"); setStatus("ok", "Done. Your results are ready."); }
-  else if (msg.type === "error"){ appendLine("ERROR: " + msg.text); setStatus("err", "Failed: " + msg.text); }
+  else if (msg.type === "error"){ appendLine("ERROR: " + msg.text); showRunError(msg.text); }
   else if (msg.type === "done"){
     if (dot.className.indexOf("err") === -1 && dot.className.indexOf("ok") === -1) setStatus("ok", "Finished.");
   }
@@ -412,27 +574,38 @@ $("#form").addEventListener("submit", async e => {
   const url = $("#url").value.trim();
   const apiKey = keyEl.value.trim();
   if (!url) return;
-  if (!apiKey){ setStatus("err", "Enter your OpenAI API key to run."); keyEl.focus(); return; }
+  if (!apiKey){ setStatus("err", "Enter your OpenAI key to compare articles."); keyEl.focus(); return; }
 
-  // Persist (or clear) the key per the checkbox.
-  if (rememberEl.checked) localStorage.setItem(KEY_STORE, apiKey);
-  else localStorage.removeItem(KEY_STORE);
+  // A new run takes precedence over a file still being read.
+  runGeneration += 1;
+  importStatus.hidden = true;
+  resultsFileInput.value = '';
+  try {
+    if (rememberEl.checked) localStorage.setItem(KEY_STORE, apiKey);
+    else localStorage.removeItem(KEY_STORE);
+  } catch (_err) { /* The comparison can run even when browser storage is blocked. */ }
 
   consoleEl.innerHTML = ""; resultsEl.innerHTML = ""; analysisEl.innerHTML = ""; rawLog = "";
   latestResults = null;
   copyResultsBtn.disabled = true;
+  printResultsBtn.disabled = true;
+  resultsEl.innerHTML = '<div class="view-heading"><p class="eyebrow">Comparison in progress</p><h1>Looking at other articles.</h1>' +
+    '<p>Your results will appear here when the comparison is complete. Follow along in Progress.</p></div>';
+  analysisEl.innerHTML = '<p class="empty">Notes will appear when this comparison is complete.</p>';
   $("#resCount").textContent = "";
   $("#analysisCount").textContent = "";
   showTab("console");
   running = true; goBtn.disabled = true;
-  setStatus("run", "Runningâ€¦ (this takes ~30â€“90s; watch it stream below)");
+  resultsFileInput.disabled = true;
+  setStatus("run", "Comparing articles. Follow along in Progress.");
 
   try {
     await streamRun(url, apiKey);
   } catch (err) {
-    setStatus("err", "Connection lost. Is the server still running?");
+    showRunError("The connection was interrupted. Check that the server is still running and try again.");
   } finally {
     running = false; goBtn.disabled = false;
+    resultsFileInput.disabled = false;
   }
 });
 

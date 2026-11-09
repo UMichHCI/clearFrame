@@ -4,7 +4,7 @@ ClearFrame â€” local web back end
 A tiny, zero-dependency HTTP + SSE backend over run.py's pipeline. It does two
 things and nothing more:
 
-  1. Serves the static front end from ./static (index.html, style.css, app.js).
+  1. Serves the web app and its latest saved results.
   2. Runs the pipeline on /run and STREAMS its terminal output to the browser,
      line by line, then a structured summary and expandable category details.
 
@@ -312,8 +312,10 @@ class Handler(BaseHTTPRequestHandler):
             self._require_auth()
             return
         parsed = urlparse(self.path)
-        if parsed.path == "/":
+        if parsed.path in {"/", "/results", "/results/"}:
             self._send_static("index.html")
+        elif parsed.path == "/api/results":
+            self._send_saved_results()
         elif parsed.path.startswith("/static/"):
             self._send_static(parsed.path[len("/static/"):])
         else:
@@ -355,6 +357,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404, "Not found")
             return
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        if ctype.startswith("text/"):
+            ctype += "; charset=utf-8"
         with open(full, "rb") as f:
             data = f.read()
         self.send_response(200)
@@ -362,6 +366,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_saved_results(self):
+        """Restore the last comparison in the app without loading the HTML export."""
+        status = 200
+        try:
+            with open(RESULTS_JSON_PATH, encoding="utf-8") as results_file:
+                data = json.load(results_file)
+        except FileNotFoundError:
+            data = None
+        except (OSError, ValueError):
+            status = 503
+            data = {"error": "Saved results are temporarily unavailable. Please reload to try again."}
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _sse(self, event: dict):
         payload = f"data: {json.dumps(event)}\n\n".encode("utf-8")

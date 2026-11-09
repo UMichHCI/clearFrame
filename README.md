@@ -69,18 +69,27 @@ python app.py
 ```
 
 Then open **<http://localhost:8000>** in your browser, paste an article URL, and
-click **Run pipeline**.
+click **Compare articles**.
 
-- **Console tab** â€” the full 9-stage terminal log streams in live as it runs
-  (~30â€“90s). Good for debugging.
-- **Results tab** â€” the selected comparison articles and the synthesis, rendered
-  as clean cards. Good for validation and for non-technical readers. After each
-  successful run, the same content is written to `results.json`, replacing the
-  previous run's file. Each completed run also regenerates `results-preview.html`,
-  a standalone reading copy that opens directly in a browser. Its print layout is
-  suitable for saving as PDF. Command-line runs regenerate the same HTML file.
-  Use **Copy for Google Docs** to copy the complete result
-  with headings, paragraphs, and linked references preserved.
+- **Results** — the main reading view, with the source headline, comparison
+  counts, overall summary, numbered findings, supporting sources, and articles
+  grouped by country. Use **Open saved results** to choose `results.json` or a
+  saved run from `debug_runs/`. The file is read on your device and fills only
+  Results; Progress and Details keep their current contents. No API key or
+  server storage is needed to open a file. Reloading the page clears the import.
+  The sidebar starts a new comparison without leaving the website. Results update
+  automatically when a run completes. Both <http://localhost:8000> and
+  <http://localhost:8000/results> open the same integrated workspace.
+  Use **Copy for Google Docs** to copy the complete result with linked references,
+  or **Print / PDF** to print the reading view without the app controls.
+- **Progress** — the full 9-stage activity log streams live during a comparison.
+- **Details** — inspect extractions and synthesis for runs completed in the
+  current browser session.
+
+After each successful web run, the results are written to `results.json`,
+replacing the previous comparison. Each completed run also regenerates
+`results-preview.html`, a standalone reading copy that opens directly in a
+browser. Command-line runs regenerate the same HTML export.
 
 Press **Ctrl+C** in the terminal to stop the server.
 

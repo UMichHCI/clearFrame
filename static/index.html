@@ -3,47 +3,73 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ClearFrame — Pipeline Runner</title>
+<meta name="description" content="Compare news coverage to see what one article leaves out.">
+<title>ClearFrame — Compare news articles</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>ClearFrame</h1>
-  <span class="tag">pipeline runner · debug &amp; validation</span>
+<a class="skip-link" href="#main">Skip to comparison</a>
+<header class="app-header">
+  <a href="/" class="brand" aria-label="ClearFrame home">ClearFrame<span aria-hidden="true">.</span></a>
+  <p class="brand-note">A wider view of the same story.</p>
+  <span class="edition">See how others tell the story.</span>
 </header>
-<div class="wrap">
-  <form id="form">
-    <div class="keyrow">
-      <input id="apiKey" type="password" placeholder="Your OpenAI API key (sk-…)" autocomplete="off" spellcheck="false" required>
-      <label class="remember"><input id="remember" type="checkbox"> Remember on this device</label>
+<div class="workspace">
+  <aside class="sidebar" aria-label="Start a comparison">
+    <div class="sidebar-inner">
+      <p class="eyebrow">Start with one article</p>
+      <h2>See the story<br> from more sides.</h2>
+      <p class="sidebar-intro">Compare how different countries cover the same event, and see what changes when you read them together.</p>
+      <form id="form">
+        <label for="url">Article link</label>
+        <input id="url" type="url" placeholder="https://…" autocomplete="url" required>
+        <label for="apiKey">Your OpenAI key</label>
+        <input id="apiKey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" required aria-describedby="keyHint">
+        <label class="remember"><input id="remember" type="checkbox"> Remember on this device</label>
+        <p class="field-note" id="keyHint">Each comparison is charged to your OpenAI account. Your key is saved only if you tick the box above. <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">Get a key ↗</a></p>
+        <button id="go" type="submit">Compare articles <span aria-hidden="true">→</span></button>
+      </form>
+      <div class="status" role="status" aria-live="polite"><span class="dot" id="dot"></span><span id="statusText">Ready for a new comparison.</span></div>
+      <div class="reading-guide">
+        <p class="eyebrow">What you’ll see</p>
+        <ol>
+          <li><span>01</span><div><strong>The bigger picture</strong><p>What you learn by reading the articles together.</p></div></li>
+          <li><span>02</span><div><strong>What’s different</strong><p>Who gets blamed, heard, or left out.</p></div></li>
+          <li><span>03</span><div><strong>The sources</strong><p>Read the articles and check for yourself.</p></div></li>
+        </ol>
+      </div>
+      <p class="sidebar-footnote">These results help you compare articles. They don’t tell us what a journalist intended.</p>
     </div>
-    <div class="urlrow">
-      <input id="url" type="url" placeholder="Paste a news article URL…" autocomplete="off" required>
-      <button id="go" type="submit">Run pipeline</button>
+  </aside>
+  <main id="main" class="main-content">
+    <nav class="view-nav" aria-label="Workspace views">
+      <div class="tabs" role="tablist" aria-label="Comparison views">
+        <button id="tabResults" class="active" role="tab" aria-selected="true" aria-controls="results">Results<span class="count" id="resCount"></span></button>
+        <button id="tabConsole" role="tab" aria-selected="false" aria-controls="consoleView" tabindex="-1">Progress</button>
+        <button id="tabAnalysis" role="tab" aria-selected="false" aria-controls="analysis" tabindex="-1">Details<span class="count" id="analysisCount"></span></button>
+      </div>
+      <div class="toolbar" id="resultsTools">
+        <button id="copyResults" disabled>Copy for Google Docs</button>
+        <button id="printResults" disabled>Print / PDF</button>
+      </div>
+    </nav>
+    <section id="resultsImport" class="results-import" aria-label="Open saved results">
+      <label for="resultsFile">Open saved results</label>
+      <input id="resultsFile" type="file" accept=".json,application/json" aria-describedby="resultsFileHint importStatus">
+      <p id="resultsFileHint">Choose results.json or a saved ClearFrame run. No key needed. The file stays on your device.</p>
+      <p id="importStatus" role="status" aria-live="polite" hidden></p>
+    </section>
+    <div id="results" role="tabpanel" aria-labelledby="tabResults" tabindex="0">
+      <div class="welcome"><p class="eyebrow">Compare news articles</p><h1>There’s more<br>to the story.</h1><p>Paste a news article to see how other news outlets report the same event. Read the differences and check the sources for yourself.</p><div class="welcome-rule"></div><p class="welcome-note">Paste an article link to start, or open a saved results file above.</p></div>
     </div>
-  </form>
-  <div class="hint">Bring your own OpenAI key — each run bills your account, and your key is sent only to this pipeline, never stored server-side. Get one at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>. The full 9-stage output streams into the Console; validated results appear in the Results tab.</div>
-
-  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Idle — paste a URL and run.</span></div>
-
-  <div class="tabs">
-    <button id="tabConsole" class="active">Console</button>
-    <button id="tabResults">Results<span class="count" id="resCount"></span></button>
-    <button id="tabAnalysis">LLM Analysis<span class="count" id="analysisCount"></span></button>
-  </div>
-  <div class="panel">
-    <div class="toolbar" id="consoleTools">
-      <button id="copyLog">Copy log</button>
-      <button id="clearLog">Clear</button>
-    </div>
-    <div class="toolbar" id="resultsTools" style="display:none">
-      <button id="copyResults" disabled>Copy for Google Docs</button>
-    </div>
-    <pre id="console"></pre>
-    <div id="results" style="display:none"></div>
-    <div id="analysis" style="display:none"></div>
-  </div>
+    <section id="consoleView" role="tabpanel" aria-labelledby="tabConsole" tabindex="0" style="display:none">
+      <div class="view-heading"><p class="eyebrow">Behind the comparison</p><h1>What’s happening</h1><p>See which articles we find and how the comparison is going.</p></div>
+      <div class="console-panel"><div class="toolbar" id="consoleTools"><button id="copyLog">Copy log</button><button id="clearLog">Clear</button></div><pre id="console" aria-label="Pipeline activity log"></pre></div>
+    </section>
+    <section id="analysis" role="tabpanel" aria-labelledby="tabAnalysis" tabindex="0" style="display:none"><div class="view-heading"><p class="eyebrow">Behind the comparison</p><h1>A closer look</h1><p>See the notes behind your results.</p></div><p class="empty">Notes appear here after you compare articles with this page open.</p></section>
+  </main>
 </div>
+<footer class="app-footer"><span>ClearFrame</span><p>Read beyond the frame.</p></footer>
 <script src="/static/app.js"></script>
 </body>
 </html>
