@@ -15,7 +15,6 @@ from openai import OpenAI
 from clearframe.config import (
     GDELT_OVERFETCH_FACTOR,
     GDELT_RESULTS_PER_COUNTRY,
-    GDELT_FALLBACK_THRESHOLD,
     MAX_ARTICLES_PER_OUTLET,
     NEAR_DUP_BODY_THRESHOLD,
     NEAR_DUP_TITLE_THRESHOLD,
@@ -27,20 +26,17 @@ from clearframe.diversity import (
     select_diverse_articles,
 )
 from clearframe.debug import dump_debug_run
-from clearframe.display import print_dev_results, print_user_results
+from clearframe.display import print_candidate_countries, print_dev_results, print_user_results
 from clearframe.stage1_fetch import get_article_text
 from clearframe.stage2_query_plan import (
     build_gdelt_query,
     clean_plan,
     find_non_country_actors,
     make_query_plan,
-    quote_if_needed,
 )
 from clearframe.stage3_gdelt_search import (
     GDELTSearchError,
-    get_fallback_domain,
     search_gdelt_balanced,
-    search_gdelt_fallback,
 )
 from clearframe.stage5_topical_gate import topical_gate
 from clearframe.stage6_fulltext import fetch_candidate_texts
@@ -53,7 +49,7 @@ from clearframe.prompts import (
 from clearframe.stage7_chomsky import chomsky_pair_analysis, extract_source_article_analysis
 from clearframe.stage9_synthesis import synthesize_category_paragraphs
 
-PAIR_ANALYSIS_MAX_WORKERS = 6
+PAIR_ANALYSIS_MAX_WORKERS = 12
 
 
 def run_clearframe_pipeline(
@@ -71,7 +67,7 @@ def run_clearframe_pipeline(
     Stages:
       1  trafilatura fetches the base article + publication date
       2  LLM builds a structured GDELT query plan, including article type
-      3  GDELT returns an overfetched candidate pool (+ regional fallback)
+      3  GDELT returns an overfetched candidate pool from actor countries
       4  Fetch full text for the metadata-deduplicated pool
       5  Remove near-duplicate full texts with word-shingle similarity
       6  Full-text topical gate
@@ -114,8 +110,14 @@ def run_clearframe_pipeline(
 
     # â”€â”€ Stage 2: Build GDELT query plan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     print("[2/9] Building GDELT query plan...")
-    plan               = make_query_plan(article_text, source_url, client)
-    plan               = clean_plan(plan, max_terms=4)
+    try:
+        plan = make_query_plan(article_text, source_url, client, publication_date=pub_date)
+        plan = clean_plan(plan, max_terms=4)
+    except ValueError as exc:
+        stop_reason = f"ClearFrame could not build a valid query plan: {exc}"
+        print(f"      [STOP] {stop_reason}")
+        return _early_exit(source_title=source_title, article_text=article_text,
+                           stop_reason=stop_reason)
     article_type = plan["article_type"]
     print(f"      Plan     : {plan}")
     print(f"      Article type: {article_type}")
@@ -152,8 +154,8 @@ def run_clearframe_pipeline(
         )
 
     query, start_dt, end_dt = build_gdelt_query(
-        plan["location"], plan["terms"], plan["query_countries"],
-        pub_date, plan["window_days_before"], plan["window_days_after"]
+        plan["terms"], plan["query_countries"],
+        plan["coverage_start_date"], plan["coverage_end_date"]
     )
     event_country = plan["source_country"]
     print(f"      Query    : {query}")
@@ -163,10 +165,6 @@ def run_clearframe_pipeline(
     print(f"      Actor countries searched: {', '.join(plan['query_countries'])}")
 
     # â”€â”€ Stage 3: Search GDELT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    loc         = quote_if_needed(plan["location"])
-    tparts      = " OR ".join(quote_if_needed(t) for t in plan["terms"])
-    terms_query = f"{loc} AND ({tparts})"
-
     print(f"\n[3/9] Searching GDELT ({start_dt[:8]} to {end_dt[:8]}, "
           f"one combined request, pool target="
           f"{gdelt_results_per_country * gdelt_overfetch_factor} per country)...")
@@ -180,7 +178,7 @@ def run_clearframe_pipeline(
             overfetch_factor=gdelt_overfetch_factor,
         )
     except GDELTSearchError as exc:
-        stop_reason = f"GDELT search failed: {exc} ClearFrame stopped without fallback."
+        stop_reason = f"GDELT search failed: {exc} ClearFrame stopped."
         print(f"      [STOP] {stop_reason}")
         return _early_exit(
             source_title=source_title,
@@ -193,47 +191,15 @@ def run_clearframe_pipeline(
     gdelt_df = pd.DataFrame(gdelt_articles)
     print(f"      GDELT returned {len(gdelt_df)} articles.")
 
-    # â”€â”€ Stage 3b: Regional fallback if too few results â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if len(gdelt_df) < GDELT_FALLBACK_THRESHOLD:
-        fallback_domain = get_fallback_domain(plan["source_country"])
-        print(f"      Only {len(gdelt_df)} result(s) â€” below threshold ({GDELT_FALLBACK_THRESHOLD}). "
-              f"Triggering regional fallback.")
-        print(f"      Fallback domain: {fallback_domain} "
-              f"(mapped from country: '{plan['source_country']}')")
-
-        try:
-            fallback_results = search_gdelt_fallback(
-                terms_query, fallback_domain, start_dt, end_dt,
-                maxrecords=gdelt_results_per_country,
-            )
-        except GDELTSearchError as exc:
-            stop_reason = f"GDELT fallback search failed: {exc} ClearFrame stopped."
-            print(f"      [STOP] {stop_reason}")
-            return _early_exit(
-                source_title=source_title,
-                article_text=article_text,
-                plan=plan,
-                query=query,
-                article_type=article_type,
-                gdelt_df=gdelt_df,
-                stop_reason=stop_reason,
-            )
-        fallback_df = pd.DataFrame(fallback_results.get("articles", []))
-
-        if not fallback_df.empty:
-            gdelt_df = (
-                pd.concat([gdelt_df, fallback_df], ignore_index=True)
-                .drop_duplicates(subset=["url"])
-                .reset_index(drop=True)
-            )
-            print(f"      After fallback merge: {len(gdelt_df)} total article(s).")
-        else:
-            print(f"      [WARNING] Fallback search also returned 0 results. Continuing with what we have.")
-
     if gdelt_df.empty:
-        print("      No results from GDELT. Exiting early.")
+        stop_reason = (
+            "No GDELT candidates matched the query for the selected actor countries "
+            "and coverage period. ClearFrame stopped before fetching comparison articles."
+        )
+        print(f"      [STOP] {stop_reason}")
         return _early_exit(source_title=source_title, article_text=article_text,
-                           plan=plan, query=query)
+                           plan=plan, query=query, article_type=article_type,
+                           stop_reason=stop_reason)
 
     candidates_df = deduplicate_candidate_metadata(gdelt_df)
     print(f"      Metadata deduplication kept {len(candidates_df)}/{len(gdelt_df)} candidate(s).")
@@ -261,6 +227,7 @@ def run_clearframe_pipeline(
     removed_count = len(fulltext_df) - len(deduplicated_df)
     print(f"      Removed {removed_count} near-duplicate article(s); "
           f"{len(deduplicated_df)} candidate(s) remain.")
+    print_candidate_countries(deduplicated_df, plan["query_countries"])
 
     # Stage 6: One full-text relevance judgment per deduplicated candidate.
     print(f"\n[6/9] Full-text topical gate over {len(deduplicated_df)} candidate(s)...")
@@ -367,7 +334,13 @@ def run_clearframe_pipeline(
 
     # Stage 9: Category synthesis, display, and debug output.
     print(f"\n[9/9] Synthesising category paragraphs from {len(pair_analyses)} pair extraction(s)...")
-    synthesis = synthesize_category_paragraphs(pair_analyses, article_text, client)
+    synthesis = synthesize_category_paragraphs(
+        pair_analyses, article_text, client,
+        source_reference={
+            "title": source_title or "Your article", "url": source_url,
+            "source_country": plan["original_source_country"], "role": "source",
+        },
+    )
     print(f"      Produced {len(synthesis.get('categories', {}))} category paragraph(s) "
           "and one concise overall summary.")
 
@@ -440,5 +413,8 @@ if __name__ == "__main__":
     # SOURCE_URL = "https://apnews.com/article/iran-war-khamenei-politics-religion-society-a9e0405878db8266e1965d7c0b396243"
     SOURCE_URL = "https://apnews.com/article/ukraine-russia-war-kyiv-strikes-july-2026-83bcba8bb972ce248a805bc576a7322c"
     output = run_clearframe_pipeline(source_url=SOURCE_URL)
+    from clearframe.report import write_results_html
+
+    write_results_html(output)
 
 

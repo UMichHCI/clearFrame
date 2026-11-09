@@ -4,6 +4,26 @@ from .config import STRUCTURAL_NOTE
 from .prompts import CATEGORY_PLAIN_LABELS, CHOMSKY_CATEGORIES
 
 
+def print_candidate_countries(candidates: pd.DataFrame, query_countries: list[str]) -> None:
+    """Show remaining candidates by source-country metadata and outlet domain."""
+    countries = candidates.get(
+        "sourcecountry", pd.Series("Unknown", index=candidates.index)
+    ).fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+    domains = candidates.get(
+        "domain", pd.Series("Unknown outlet", index=candidates.index)
+    ).fillna("Unknown outlet").astype(str).str.strip().replace("", "Unknown outlet")
+    country_names = sorted(set(query_countries) | set(countries))
+    print("      Remaining candidates by source country (GDELT metadata):")
+    for country in country_names:
+        country_domains = domains[countries == country]
+        outlets = ", ".join(
+            f"{domain} ({count})"
+            for domain, count in country_domains.value_counts().sort_index().items()
+        )
+        suffix = f"; outlets: {outlets}" if outlets else ""
+        print(f"        {country}: {len(country_domains)} candidate(s){suffix}")
+
+
 def print_user_results(category_synthesis: dict) -> None:
     """Print final category paragraphs. No rankings or scores."""
     print(f"\n{'='*70}")
@@ -23,16 +43,17 @@ def print_user_results(category_synthesis: dict) -> None:
                 country = str(article.get("source_country", ""))
                 url = str(article.get("url", ""))
                 source = country or outlet
-                print(f"  - {title} ({source}) {url}".rstrip())
+                number = f"[{article['citation_id']}] " if article.get("citation_id") else ""
+                print(f"  - {number}{title} ({source}) {url}".rstrip())
         print()
     if not categories:
         if not summary:
-            print("No meaningful category-level differences surfaced for this story.")
+            print("The comparison did not find clear evidence of an important difference in how these articles explain the story.")
         print(f"\n{STRUCTURAL_NOTE}")
         print(f"{'='*70}")
         return
 
-    print("CATEGORY DETAILS")
+    print("FINDINGS EXPLAINED")
     for category in CHOMSKY_CATEGORIES:
         item = categories.get(category)
         if not isinstance(item, dict):

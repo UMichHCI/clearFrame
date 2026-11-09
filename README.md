@@ -19,14 +19,20 @@ There are two ways to run it:
 The pipeline runs in nine stages:
 
 1. **Fetch** the base article text, headline, and publication date (`trafilatura`).
-2. **Query plan** â€” an LLM identifies the article type and builds a structured GDELT search (location, countries, terms, time window).
-3. **Search GDELT** for an overfetched candidate pool, with a regional fallback when needed.
+2. **Query plan** â€” an LLM identifies the article type and builds a structured GDELT search using event-specific terms, publishing countries, and an estimated coverage period. Location is descriptive metadata, not a required search phrase.
+3. **Search GDELT** for an overfetched candidate pool from actor countries. Stop if the search fails or returns no candidates.
 4. **Full-text fetch** for every metadata-unique candidate, local sources first.
 5. **NLP deduplication** clusters near-duplicate full texts within each country and keeps the most complete copy.
 6. **Full-text topical gate** makes one binary "same event?" judgment per remaining article.
 7. **Diversity selection** keeps up to 10 articles per country, no more than two per outlet, preferring different outlets first.
 8. **Pair analysis** compares every selected article with the source across six propaganda-model categories.
 9. **Synthesis + display** combines evidence-backed differences, displays them, and saves a debug record.
+
+Query planning and topical filtering use `gpt-6-luna` with low reasoning effort.
+Article extraction, pair analysis, and synthesis use `gpt-6.1-sol` with medium
+reasoning effort. Models and reasoning settings are configured in
+`clearframe/config.py`. Completion limits include room for internal reasoning;
+reasoning tokens contribute to API costs.
 
 ---
 
@@ -63,15 +69,27 @@ python app.py
 ```
 
 Then open **<http://localhost:8000>** in your browser, paste an article URL, and
-click **Run pipeline**.
+click **Compare articles**.
 
-- **Console tab** â€” the full 9-stage terminal log streams in live as it runs
-  (~30â€“90s). Good for debugging.
-- **Results tab** â€” the selected comparison articles and the synthesis, rendered
-  as clean cards. Good for validation and for non-technical readers. After each
-  successful run, the same content is written to `results.json`, replacing the
-  previous run's file. Use **Copy for Google Docs** to copy the complete result
-  with headings, paragraphs, and linked references preserved.
+- **Results** — the main reading view, with the source headline, comparison
+  counts, overall summary, numbered findings, supporting sources, and articles
+  grouped by country. Use **Open saved results** to choose `results.json` or a
+  saved run from `debug_runs/`. The file is read on your device and fills only
+  Results; Progress and Details keep their current contents. No API key or
+  server storage is needed to open a file. Reloading the page clears the import.
+  The sidebar starts a new comparison without leaving the website. Results update
+  automatically when a run completes. Both <http://localhost:8000> and
+  <http://localhost:8000/results> open the same integrated workspace.
+  Use **Copy for Google Docs** to copy the complete result with linked references,
+  or **Print / PDF** to print the reading view without the app controls.
+- **Progress** — the full 9-stage activity log streams live during a comparison.
+- **Details** — inspect extractions and synthesis for runs completed in the
+  current browser session.
+
+After each successful web run, the results are written to `results.json`,
+replacing the previous comparison. Each completed run also regenerates
+`results-preview.html`, a standalone reading copy that opens directly in a
+browser. Command-line runs regenerate the same HTML export.
 
 Press **Ctrl+C** in the terminal to stop the server.
 

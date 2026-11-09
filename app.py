@@ -4,7 +4,7 @@ ClearFrame â€” local web back end
 A tiny, zero-dependency HTTP + SSE backend over run.py's pipeline. It does two
 things and nothing more:
 
-  1. Serves the static front end from ./static (index.html, style.css, app.js).
+  1. Serves the web app and its latest saved results.
   2. Runs the pipeline on /run and STREAMS its terminal output to the browser,
      line by line, then a structured summary and expandable category details.
 
@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 import pandas as pd
 
 from clearframe.prompts import CATEGORY_PLAIN_LABELS
+from clearframe.report import REPORT_PATH, write_results_html
 from run import run_clearframe_pipeline
 
 # Bind config. Locally these default to localhost:8000. When hosted (e.g. on
@@ -54,6 +55,7 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # The latest successful Results-tab payload. This intentionally uses one fixed
 # filename so a new run replaces the previous run instead of accumulating files.
 RESULTS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.json")
+RESULTS_HTML_PATH = REPORT_PATH
 
 # Only one pipeline run streams at a time. Redirecting sys.stdout is process
 # global, so serialising runs keeps two concurrent runs from interleaving lines.
@@ -179,7 +181,7 @@ def _summarize_llm_analysis(result: dict) -> dict:
 
 
 def _write_results_json(result_summary: dict) -> None:
-    """Overwrite results.json with exactly the data rendered in the Results tab."""
+    """Refresh the JSON snapshot and standalone HTML from the same Results-tab data."""
     results_tab_data = {
         key: value
         for key, value in result_summary.items()
@@ -188,6 +190,7 @@ def _write_results_json(result_summary: dict) -> None:
     with open(RESULTS_JSON_PATH, "w", encoding="utf-8") as results_file:
         json.dump(results_tab_data, results_file, ensure_ascii=False, indent=2)
         results_file.write("\n")
+    write_results_html(results_tab_data, RESULTS_HTML_PATH)
 
 
 def _strip_source_from_pair_extractions(pair_analyses) -> list[dict]:
@@ -309,8 +312,10 @@ class Handler(BaseHTTPRequestHandler):
             self._require_auth()
             return
         parsed = urlparse(self.path)
-        if parsed.path == "/":
+        if parsed.path in {"/", "/results", "/results/"}:
             self._send_static("index.html")
+        elif parsed.path == "/api/results":
+            self._send_saved_results()
         elif parsed.path.startswith("/static/"):
             self._send_static(parsed.path[len("/static/"):])
         else:
@@ -352,6 +357,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404, "Not found")
             return
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        if ctype.startswith("text/"):
+            ctype += "; charset=utf-8"
         with open(full, "rb") as f:
             data = f.read()
         self.send_response(200)
@@ -359,6 +366,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_saved_results(self):
+        """Restore the last comparison in the app without loading the HTML export."""
+        status = 200
+        try:
+            with open(RESULTS_JSON_PATH, encoding="utf-8") as results_file:
+                data = json.load(results_file)
+        except FileNotFoundError:
+            data = None
+        except (OSError, ValueError):
+            status = 503
+            data = {"error": "Saved results are temporarily unavailable. Please reload to try again."}
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _sse(self, event: dict):
         payload = f"data: {json.dumps(event)}\n\n".encode("utf-8")

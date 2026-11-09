@@ -2,7 +2,7 @@
 
 import requests
 
-from .config import COUNTRY_FALLBACK, FALLBACK_DEFAULT, GDELT_URL
+from .config import GDELT_URL
 
 _gdelt_request_count = 0
 
@@ -13,25 +13,6 @@ class GDELTSearchError(RuntimeError):
 
 def normalize_country(text: str) -> str:
     return str(text).strip().lower().replace(" ", "")
-
-
-def get_fallback_domain(country: str) -> str:
-    """Returns the regional fallback domain for a given country, or FALLBACK_DEFAULT."""
-    return COUNTRY_FALLBACK.get(country.lower().strip(), FALLBACK_DEFAULT)
-
-
-def search_gdelt_fallback(
-    query_terms: str, fallback_domain: str,
-    startdatetime: str, enddatetime: str,
-    maxrecords: int = 50
-) -> dict:
-    """
-    Runs a GDELT search replacing the sourcecountry filter with domain:fallback_domain.
-    query_terms should be the location+terms portion of the query only â€” no sourcecountry clause.
-    """
-    fallback_query = f"{query_terms} AND domain:{fallback_domain}"
-    return search_gdelt(fallback_query, startdatetime=startdatetime,
-                        enddatetime=enddatetime, maxrecords=maxrecords)
 
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -63,22 +44,23 @@ def search_gdelt(query: str, startdatetime: str, enddatetime: str, maxrecords: i
     # than allowed to crash the pipeline. Fixed 5s keeps total wait bounded and
     # avoids the long tail of exponential backoff.
     RETRY_WAIT = 5
+    MAX_ATTEMPTS = 10
     response = None
     last_request_error = None
-    for attempt in range(5):
+    for attempt in range(MAX_ATTEMPTS):
         try:
             response = requests.get(GDELT_URL, params=params, timeout=30)
         except requests.exceptions.RequestException as e:
             last_request_error = e
             print(f"  [DEBUG] GDELT request failed ({e.__class__.__name__}) on attempt {attempt + 1}.")
-            if attempt < 4:
+            if attempt < MAX_ATTEMPTS - 1:
                 print(f"  [DEBUG] Waiting {RETRY_WAIT}s before retry...")
                 time.sleep(RETRY_WAIT)
             continue
 
         print(f"  [DEBUG] GDELT HTTP status: {response.status_code} (attempt {attempt + 1})")
         if response.status_code == 429:
-            if attempt < 4:
+            if attempt < MAX_ATTEMPTS - 1:
                 print(f"  [DEBUG] Rate limited â€” waiting {RETRY_WAIT}s before retry...")
                 time.sleep(RETRY_WAIT)
             continue
@@ -96,7 +78,7 @@ def search_gdelt(query: str, startdatetime: str, enddatetime: str, maxrecords: i
 
     if response.status_code == 429:
         raise GDELTSearchError(
-            "GDELT rate limiting persisted after 5 attempts."
+            f"GDELT rate limiting persisted after {MAX_ATTEMPTS} attempts."
         )
 
     try:
